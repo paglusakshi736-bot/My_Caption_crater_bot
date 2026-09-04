@@ -3,11 +3,13 @@ import re
 import asyncio
 from pyrogram import Client, filters
 from pyrogram.errors import FloodWait
+from aiohttp import web
 
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 TARGET_CHANNEL = int(os.environ.get("TARGET_CHANNEL"))
+PORT = int(os.environ.get("PORT", 8080))
 
 CUSTOM_FOOTER = "\n\n🎬 Join: @your_channel"
 
@@ -51,11 +53,23 @@ async def process_media(client, message):
     except Exception as e:
         print(f"Error: {e}")
 
+# Render के पोर्ट डिटेक्शन के लिए डमी वेब सर्वर
+async def handle_ping(request):
+    return web.Response(text="Bot is running fine!")
+
+async def start_web_server():
+    server = web.Application()
+    server.router.add_get("/", handle_ping)
+    runner = web.AppRunner(server)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
 async def main():
+    await start_web_server()
     async with app:
         print("Bot Start Ho Gaya...")
         await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
