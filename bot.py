@@ -48,29 +48,46 @@ def add_to_total_count(added_number):
     return current
 
 def clean_caption_text(text):
-    if not text:
+    if not text or not text.strip():
         return f"┏━━━━━━━━━━━━━━━━━┓\n🎬 **New Movie**\n┗━━━━━━━━━━━━━━━━━┛{CUSTOM_FOOTER}"
     
-    # 1. पहली लाइन उठाना
+    # 1. एक्सटेंशन, लिंक और @username हटाना
+    text = re.sub(r'\.(mkv|mp4|avi|webm|mov)$', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'https?://\S+|www\.\S+|t\.me/\S+', ' ', text)
+    text = re.sub(r'@[\w_]+', ' ', text)
+
     lines = [l.strip() for l in text.split('\n') if l.strip()]
-    first_line = lines[0] if lines else text
+    raw_title = lines[0] if lines else text
 
-    # 2. फ़ाइल एक्सटेंशन (.mkv, .mp4 आदि) हटाना
-    first_line = re.sub(r'\.(mkv|mp4|avi|webm|mov)$', '', first_line, flags=re.IGNORECASE)
+    # डॉट्स और अंडरस्कोर को स्पेस में बदलना
+    raw_title = re.sub(r'[\._]', ' ', raw_title)
 
-    # 3. सिर्फ लिंक्स और @usernames को हटाना
-    first_line = re.sub(r'https?://\S+|www\.\S+|t\.me/\S+', '', first_line)
-    first_line = re.sub(r'@[\w_]+', '', first_line)
+    # 2. साल खोजना (1950 - 2035)
+    year_match = re.search(r'\b(19[5-9]\d|20[0-3]\d)\b', raw_title)
+    year = f" ({year_match.group(1)})" if year_match else ""
 
-    # 4. एक्स्ट्रा स्पेसेस साफ़ करना (नाम को बिना काटे सुरक्षित रखना)
-    cleaned_title = re.sub(r'\s+', ' ', first_line).strip()
+    # 3. रेजोल्यूशन खोजना (1080p, 720p, 480p, 4k)
+    res_match = re.search(r'(\d{3,4}p|4K)', raw_title, re.IGNORECASE)
+    quality = f" [{res_match.group(1).upper()}]" if res_match else ""
 
-    if not cleaned_title:
-        cleaned_title = "New Movie"
+    # 4. नाम निकालना: साल या रेजोल्यूशन से पहले का हिस्सा
+    if year_match:
+        name = raw_title[:year_match.start()].strip()
+    elif res_match:
+        name = raw_title[:res_match.start()].strip()
+    else:
+        name = re.split(r'[\(\[\-#]', raw_title)[0].strip()
+
+    # नाम के आगे-पीछे के ब्रैकेट या सिंबल साफ करना
+    name = re.sub(r'[\(\)\[\]\-_#|~★❤✔➔➜•:]+', ' ', name).strip()
+    name = re.sub(r'\s+', ' ', name)
+
+    if not name:
+        name = "New Movie"
 
     return (
         f"┏━━━━━━━━━━━━━━━━━┓\n"
-        f"🎬 **{cleaned_title}**\n"
+        f"🎬 **{name}{year}{quality}**\n"
         f"┗━━━━━━━━━━━━━━━━━┛"
         f"{CUSTOM_FOOTER}"
     )
@@ -98,13 +115,14 @@ async def worker():
             task_queue.task_done()
             continue
 
-        file_name = ""
-        if msg.document and msg.document.file_name:
-            file_name = msg.document.file_name
-        elif msg.video and msg.video.file_name:
-            file_name = msg.video.file_name
+        # नाम निकालने के लिए कैप्शन या फाइलनेम ढूंढना
+        original_text = msg.caption or ""
+        if not original_text:
+            if msg.document and msg.document.file_name:
+                original_text = msg.document.file_name
+            elif msg.video and msg.video.file_name:
+                original_text = msg.video.file_name
 
-        original_text = msg.caption or file_name or ""
         new_caption = clean_caption_text(original_text)
 
         success = False
