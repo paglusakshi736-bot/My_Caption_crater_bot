@@ -291,39 +291,59 @@ async def stats_handler(client, message):
         f"• Queue me bachi files: **{q_size}**"
     )
 
-# पुरानी फाइलों को स्कैन करके इंडेक्स बनाने का सेफ कमांड
+# 100-100 IDs Batch Scanning System (Error Free)
 @app.on_message(filters.command("build_index") & filters.private)
 async def build_index_handler(client, message):
-    status_msg = await message.reply_text("⏳ **Channel scan shuru ho gaya hai... Kripya thoda intezar karein.**")
+    status_msg = await message.reply_text("⏳ **Channel scan shuru ho gaya hai... Kripya 1-2 minute wait karein.**")
     clean_id = get_clean_channel_id(TARGET_CHANNEL)
     data = load_index_data()
 
+    try:
+        temp_msg = await app.send_message(TARGET_CHANNEL, "🔍 Checking index...")
+        latest_id = temp_msg.id
+        await temp_msg.delete()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Channel send permission check karein: {e}")
+        return
+
     scanned = 0
     added = 0
+    batch_size = 100
+
     try:
-        async for post in app.get_chat_history(TARGET_CHANNEL):
-            scanned += 1
-            if post.document or post.video:
-                raw = post.caption or ""
-                if not raw:
-                    if post.document and post.document.file_name:
-                        raw = post.document.file_name
-                    elif post.video and post.video.file_name:
-                        raw = post.video.file_name
+        for i in range(1, latest_id + 1, batch_size):
+            msg_ids = list(range(i, min(i + batch_size, latest_id + 1)))
+            try:
+                messages = await app.get_messages(TARGET_CHANNEL, msg_ids)
+            except FloodWait as e:
+                await asyncio.sleep(e.value + 2)
+                messages = await app.get_messages(TARGET_CHANNEL, msg_ids)
+            except Exception:
+                continue
 
-                _, display_title = clean_caption_text(raw, fallback_id=post.id)
-                if display_title not in data["movies"]:
-                    data["movies"][display_title] = f"https://t.me/c/{clean_id}/{post.id}"
-                    added += 1
+            for post in messages:
+                if not post or post.empty:
+                    continue
+                scanned += 1
+                if post.document or post.video:
+                    raw = post.caption or ""
+                    if not raw:
+                        if post.document and post.document.file_name:
+                            raw = post.document.file_name
+                        elif post.video and post.video.file_name:
+                            raw = post.video.file_name
 
-            # टेलीग्राम ब्लॉकिंग से बचने के लिए हर 50 मैसेज पर सेफ डिले
-            if scanned % 50 == 0:
-                await asyncio.sleep(1)
+                    _, display_title = clean_caption_text(raw, fallback_id=post.id)
+                    if display_title not in data["movies"]:
+                        data["movies"][display_title] = f"https://t.me/c/{clean_id}/{post.id}"
+                        added += 1
+
+            await asyncio.sleep(0.5)
 
         await render_index_messages(data)
         await status_msg.edit_text(
             f"✅ **Master Index Taiyar Ho Gaya Hai!**\n\n"
-            f"🔍 Scanned Posts: **{scanned}**\n"
+            f"🔍 Total Messages Scanned: **{scanned}**\n"
             f"🎬 Unique Movies in Index: **{len(data['movies'])}**\n"
             f"📌 Channel me Master Index update aur pin ho chuka hai."
         )
@@ -331,34 +351,4 @@ async def build_index_handler(client, message):
         await asyncio.sleep(e.value + 2)
     except Exception as e:
         await status_msg.edit_text(f"❌ Index banane me error: {e}")
-
-@app.on_message(filters.media & filters.private)
-async def process_media(client, message):
-    await task_queue.put((message.chat.id, message.id))
-
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is alive!")
-
-def run_web():
-    httpd = HTTPServer(("0.0.0.0", PORT), SimpleHandler)
-    httpd.serve_forever()
-
-async def keep_alive_pinger():
-    await asyncio.sleep(30)
-    while True:
-        if RENDER_EXTERNAL_URL:
-            try:
-                urllib.request.urlopen(RENDER_EXTERNAL_URL)
-            except Exception:
-                pass
-        await asyncio.sleep(600)
-
-if __name__ == "__main__":
-    threading.Thread(target=run_web, daemon=True).start()
-    loop = asyncio.get_event_loop()
-    loop.create_task(worker())
-    loop.create_task(keep_alive_pinger())
-    app.run()
+        
