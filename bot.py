@@ -35,25 +35,36 @@ def clean_caption_text(text):
     clean_text = re.sub(r'http\S+|@\S+', '', text).strip()
     return f"{clean_text}{CUSTOM_FOOTER}"
 
-@app.on_message(filters.media & filters.private)
+# किसी भी मैसेज पर रिस्पॉन्स चेक करने के लिए
+@app.on_message(filters.private)
 async def process_media(client, message):
+    print("==> Bot ko message mila!")
+    
+    # अगर सिर्फ टेक्स्ट या /start भेजा है
+    if message.text:
+        await message.reply_text("✅ Bot active hai! Ab movie file bhejo.")
+        return
+
     try:
         original_caption = message.caption or (message.document.file_name if message.document else "")
         new_caption = clean_caption_text(original_caption)
         
+        print(f"==> Target Channel me bhej raha hu: {TARGET_CHANNEL}")
         await message.copy(
             chat_id=TARGET_CHANNEL,
             caption=new_caption
         )
-        await asyncio.sleep(2)
+        print("==> File channel me successfully chali gayi!")
+        await message.reply_text("✅ Channel me bhej diya gaya hai!")
         
     except FloodWait as e:
+        print(f"FloodWait error: {e.value} seconds")
         await asyncio.sleep(e.value)
         await message.copy(chat_id=TARGET_CHANNEL, caption=new_caption)
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"CRITICAL ERROR: {e}")
+        await message.reply_text(f"❌ Error: {e}")
 
-# Render के पोर्ट डिटेक्शन के लिए डमी वेब सर्वर
 async def handle_ping(request):
     return web.Response(text="Bot is running fine!")
 
@@ -67,9 +78,12 @@ async def start_web_server():
 
 async def main():
     await start_web_server()
-    async with app:
-        print("Bot Start Ho Gaya...")
-        await asyncio.Event().wait()
+    print("Bot Start Ho Gaya...")
+    await app.start()
+    # Bot ko background me active rakhne ke liye idle wait
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
