@@ -47,14 +47,18 @@ def add_to_total_count(added_number):
         json.dump({"total_processed": current}, f)
     return current
 
-def clean_caption_text(text):
+def clean_caption_text(text, fallback_id=None):
     if not text or not text.strip():
-        return f"┏━━━━━━━━━━━━━━━━━┓\n🎬 **New Movie**\n┗━━━━━━━━━━━━━━━━━┛{CUSTOM_FOOTER}"
+        # Agar bilkul koi text nahi mila to Unique Search Tag dega
+        tag = f" #ID_{fallback_id}" if fallback_id else ""
+        return f"┏━━━━━━━━━━━━━━━━━┓\n🎬 **Update Name{tag}**\n┗━━━━━━━━━━━━━━━━━┛{CUSTOM_FOOTER}"
     
     # 1. एक्सटेंशन, लिंक और @username हटाना
     text = re.sub(r'\.(mkv|mp4|avi|webm|mov)$', '', text, flags=re.IGNORECASE)
     text = re.sub(r'https?://\S+|www\.\S+|t\.me/\S+', ' ', text)
     text = re.sub(r'@[\w_]+', ' ', text)
+    text = re.sub(r'join\s+us\s+on\s+telegram', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'join\s+telegram', ' ', text, flags=re.IGNORECASE)
 
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     raw_title = lines[0] if lines else text
@@ -78,12 +82,13 @@ def clean_caption_text(text):
     else:
         name = re.split(r'[\(\[\-#]', raw_title)[0].strip()
 
-    # नाम के आगे-पीछे के ब्रैकेट या सिंबल साफ करना
+    # नाम के सिंबल्स साफ़ करना
     name = re.sub(r'[\(\)\[\]\-_#|~★❤✔➔➜•:]+', ' ', name).strip()
     name = re.sub(r'\s+', ' ', name)
 
     if not name:
-        name = "New Movie"
+        tag = f" #ID_{fallback_id}" if fallback_id else ""
+        name = f"Update Name{tag}"
 
     return (
         f"┏━━━━━━━━━━━━━━━━━┓\n"
@@ -115,15 +120,18 @@ async def worker():
             task_queue.task_done()
             continue
 
-        # नाम निकालने के लिए कैप्शन या फाइलनेम ढूंढना
+        # डीप टेक्स्ट एक्सट्रैक्शन (हर संभव जगह से नाम निकालना)
         original_text = msg.caption or ""
         if not original_text:
-            if msg.document and msg.document.file_name:
-                original_text = msg.document.file_name
-            elif msg.video and msg.video.file_name:
-                original_text = msg.video.file_name
+            if msg.document:
+                original_text = msg.document.file_name or ""
+            elif msg.video:
+                # वीडियो के अंदरूनी टैग्स और फाइलनेम चेक करना
+                original_text = getattr(msg.video, 'file_name', None) or getattr(msg.video, 'file_name', '')
+                if not original_text and hasattr(msg.video, 'thumbs') and msg.video.thumbs:
+                    pass
 
-        new_caption = clean_caption_text(original_text)
+        new_caption = clean_caption_text(original_text, fallback_id=msg.id)
 
         success = False
         while not success:
