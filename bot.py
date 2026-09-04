@@ -69,7 +69,6 @@ def get_clean_channel_id(channel_id):
         return s[1:]
     return s
 
-# आपका वही पुराना 100% टेस्टेड कैप्शन लॉजिक
 def clean_caption_text(text, fallback_id=None):
     if not text or not text.strip():
         tag = f" #ID_{fallback_id}" if fallback_id else ""
@@ -160,7 +159,6 @@ async def render_index_messages(data):
                     parse_mode=ParseMode.MARKDOWN
                 )
                 data["message_ids"].append(sent.id)
-                # सिर्फ पहले पार्ट को पिन करेगा
                 if idx == 0:
                     try:
                         await sent.pin(disable_notification=True)
@@ -187,7 +185,6 @@ task_queue = asyncio.Queue()
 batch_count = 0
 active_user_id = None
 
-# आपका वर्कर लॉजिक - बिना किसी छेड़छाड़ के
 async def worker():
     global batch_count, active_user_id
     while True:
@@ -226,8 +223,6 @@ async def worker():
                 )
                 success = True
                 batch_count += 1
-                
-                # नई फाइल का नाम ऑटोमैटिक मास्टर लिस्ट में जुड़ेगा
                 await update_master_index(display_title, copied_msg.id)
             except FloodWait as e:
                 await asyncio.sleep(e.value + 2)
@@ -291,7 +286,6 @@ async def stats_handler(client, message):
         f"• Queue me bachi files: **{q_size}**"
     )
 
-# 100-100 IDs Batch Scanning System (Error Free)
 @app.on_message(filters.command("build_index") & filters.private)
 async def build_index_handler(client, message):
     status_msg = await message.reply_text("⏳ **Channel scan shuru ho gaya hai... Kripya 1-2 minute wait karein.**")
@@ -351,4 +345,39 @@ async def build_index_handler(client, message):
         await asyncio.sleep(e.value + 2)
     except Exception as e:
         await status_msg.edit_text(f"❌ Index banane me error: {e}")
-        
+
+@app.on_message(filters.media & filters.private)
+async def process_media(client, message):
+    await task_queue.put((message.chat.id, message.id))
+
+# HEAD & GET dono handle karega taaki 501 error na aaye
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+def run_web():
+    httpd = HTTPServer(("0.0.0.0", PORT), SimpleHandler)
+    httpd.serve_forever()
+
+async def keep_alive_pinger():
+    await asyncio.sleep(30)
+    while True:
+        if RENDER_EXTERNAL_URL:
+            try:
+                urllib.request.urlopen(RENDER_EXTERNAL_URL)
+            except Exception:
+                pass
+        await asyncio.sleep(600)
+
+if __name__ == "__main__":
+    threading.Thread(target=run_web, daemon=True).start()
+    loop = asyncio.get_event_loop()
+    loop.create_task(worker())
+    loop.create_task(keep_alive_pinger())
+    app.run()
