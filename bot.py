@@ -3,6 +3,7 @@ import re
 import json
 import asyncio
 import threading
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
@@ -13,6 +14,7 @@ API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 TARGET_CHANNEL = int(os.environ.get("TARGET_CHANNEL"))
 PORT = int(os.environ.get("PORT", 8080))
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 STATS_FILE = "stats.json"
 
@@ -30,7 +32,6 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
-# Persistent Stats Handlers
 def get_total_count():
     if os.path.exists(STATS_FILE):
         try:
@@ -79,90 +80,111 @@ def clean_caption_text(text):
         f"{CUSTOM_FOOTER}"
     )
 
-# Bulk Batch Tracker
-batch_queue = {}
-batch_tasks = {}
+task_queue = asyncio.Queue()
+batch_count = 0
+active_user_id = None
 
-async def wait_and_notify(user_id, client):
-    # 5 सेकंड तक नई फाइल का इंतज़ार करेगा, फिर फाइनल समरी भेजेगा
-    await asyncio.sleep(5)
-    if user_id in batch_queue and batch_queue[user_id] > 0:
-        batch_count = batch_queue[user_id]
-        batch_queue[user_id] = 0
-        total = add_to_total_count(batch_count)
-        await client.send_message(
-            chat_id=user_id,
-            text=(
-                f"✅ **Batch Processing Complete!**\n\n"
-                f"📥 Is baar bheji gayi: **{batch_count} files**\n"
-                f"📊 Channel me ab tak total: **{total} files**"
-            )
-        )
+async def worker():
+    global batch_count, active_user_id
+    while True:
+        chat_id, msg_id = await task_queue.get()
+        active_user_id = chat_id
+        
+        try:
+            msg = await app.get_messages(chat_id=chat_id, message_ids=msg_id)
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 1)
+            msg = await app.get_messages(chat_id=chat_id, message_ids=msg_id)
+        except Exception:
+            task_queue.task_done()
+            continue
+
+        if not msg or msg.empty:
+            task_queue.task_done()
+            continue
+
+        file_name = ""
+        if msg.document and msg.document.file_name:
+            file_name = msg.document.file_name
+        elif msg.video and msg.video.file_name:
+            file_name = msg.video.file_name
+
+        original_text = msg.caption or file_name or ""
+        new_caption = clean_caption_text(original_text)
+
+        success = False
+        while not success:
+            try:
+                await msg.copy(
+                    chat_id=TARGET_CHANNEL,
+                    caption=new_caption,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                success = True
+                batch_count += 1
+            except FloodWait as e:
+                await asyncio.sleep(e.value + 2)
+            except Exception as e:
+                print(f"Skipping file due to error: {e}")
+                break
+
+        if batch_count >= 50:
+            total = add_to_total_count(batch_count)
+            try:
+                await app.send_message(
+                    chat_id=active_user_id,
+                    text=(
+                        f"🚀 **50 Files Done!**\n\n"
+                        f"✅ 50 files successfully post ho gayi hain.\n"
+                        f"📊 Total Channel Files: **{total}**\n"
+                        f"⏳ Remaining in Queue: **{task_queue.qsize()} files**"
+                    )
+                )
+            except Exception:
+                pass
+            batch_count = 0
+
+        task_queue.task_done()
+        await asyncio.sleep(2.5)
+
+        if task_queue.empty() and batch_count > 0:
+            total = add_to_total_count(batch_count)
+            try:
+                await app.send_message(
+                    chat_id=active_user_id,
+                    text=(
+                        f"🎉 **Sabhi Files Complete Ho Gayi Hain!**\n\n"
+                        f"📥 Last Batch: **{batch_count} files**\n"
+                        f"📊 Total Files in Channel: **{total}**\n"
+                        f"✨ Queue bilkul khali ho chuki hai."
+                    )
+                )
+            except Exception:
+                pass
+            batch_count = 0
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     count = get_total_count()
     await message.reply_text(
-        f"✅ **Bot Active Hai!**\n\n"
-        f"📊 Ab tak total **{count}** files channel me bheji ja chuki hain.\n"
-        f"Aap single ya bulk me movie files forward karein."
+        f"🤖 **Caption Cleaner Bot Active Hai!**\n\n"
+        f"📊 Channel me ab tak total: **{count} files**\n"
+        f"⚡ Aap bulk me files forward karein, bot queue me sambhal lega."
     )
 
 @app.on_message(filters.command("stats") & filters.private)
 async def stats_handler(client, message):
     count = get_total_count()
-    await message.reply_text(f"📊 Total Posted Files: **{count}**")
+    q_size = task_queue.qsize()
+    await message.reply_text(
+        f"📊 **Live Status:**\n"
+        f"• Total Channel Files: **{count}**\n"
+        f"• Queue me bachi files: **{q_size}**"
+    )
 
 @app.on_message(filters.media & filters.private)
 async def process_media(client, message):
-    user_id = message.from_user.id
-    
-    # अगर पिछला टाइमर चल रहा था, तो उसे कैंसिल करके नया बनाएगा
-    if user_id in batch_tasks and not batch_tasks[user_id].done():
-        batch_tasks[user_id].cancel()
-
-    try:
-        file_name = ""
-        if message.document and message.document.file_name:
-            file_name = message.document.file_name
-        elif message.video and message.video.file_name:
-            file_name = message.video.file_name
-
-        original_text = message.caption or file_name or ""
-        new_caption = clean_caption_text(original_text)
-        
-        await message.copy(
-            chat_id=TARGET_CHANNEL,
-            caption=new_caption,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        # बैच काउंट बढ़ाना
-        batch_queue[user_id] = batch_queue.get(user_id, 0) + 1
-        
-        # अगर लगातार 50 फाइलें पूरी हो गईं:
-        if batch_queue[user_id] >= 50:
-            batch_count = batch_queue[user_id]
-            batch_queue[user_id] = 0
-            total = add_to_total_count(batch_count)
-            await message.reply_text(
-                f"✅ **50 Files Completed!**\n\n"
-                f"📥 50 files successfully channel me bhej di gayi hain.\n"
-                f"📊 Total Channel Files: **{total}**"
-            )
-        else:
-            # 50 से कम होने पर टाइमर सेट करेगा
-            batch_tasks[user_id] = asyncio.create_task(wait_and_notify(user_id, client))
-
-        # Telegram limits ke liye safe delay
-        await asyncio.sleep(2)
-        
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
-        await message.copy(chat_id=TARGET_CHANNEL, caption=new_caption, parse_mode=ParseMode.MARKDOWN)
-        batch_queue[user_id] = batch_queue.get(user_id, 0) + 1
-    except Exception as e:
-        await message.reply_text(f"❌ Error: {e}")
+    await task_queue.put((message.chat.id, message.id))
 
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -174,8 +196,21 @@ def run_web():
     httpd = HTTPServer(("0.0.0.0", PORT), SimpleHandler)
     httpd.serve_forever()
 
+async def keep_alive_pinger():
+    await asyncio.sleep(30)
+    while True:
+        if RENDER_EXTERNAL_URL:
+            try:
+                urllib.request.urlopen(RENDER_EXTERNAL_URL)
+            except Exception:
+                pass
+        await asyncio.sleep(600)
+
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
-    print("Bot starting via app.run()...")
-    app.run()
     
+    loop = asyncio.get_event_loop()
+    loop.create_task(worker())
+    loop.create_task(keep_alive_pinger())
+    
+    app.run()
