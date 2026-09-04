@@ -12,7 +12,11 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 TARGET_CHANNEL = int(os.environ.get("TARGET_CHANNEL"))
 PORT = int(os.environ.get("PORT", 8080))
 
-CUSTOM_FOOTER = "\n\n🎬 Join: @your_channel"
+CUSTOM_FOOTER = (
+    "\n\n"
+    "🤖 Bot: @Movie_zone_1bot\n"
+    "🍿 Join Channel: https://t.me/+nDKhro-O0mBiZTY1"
+)
 
 app = Client(
     "CaptionCleanerBot",
@@ -23,34 +27,58 @@ app = Client(
 
 def clean_caption_text(text):
     if not text:
-        return ""
-    pattern = r"([a-zA-Z0-9\s\.\-_]+?)(19\d\d|20\d\d).*?(\d{3,4}p|HEVC|HDR|HD)"
-    match = re.search(pattern, text, re.IGNORECASE)
+        return f"🎬 **New Movie**{CUSTOM_FOOTER}"
     
-    if match:
-        name = match.group(1).replace('.', ' ').strip()
-        year = match.group(2)
-        quality = match.group(3).upper()
-        return f"🎬 **{name} ({year}) [{quality}]**{CUSTOM_FOOTER}"
+    # फाइल एक्सटेंशन (.mkv, .mp4, etc.) पहले ही हटा लें
+    text = re.sub(r'\.(mkv|mp4|avi|webm|mov)$', '', text, flags=re.IGNORECASE)
     
-    clean_text = re.sub(r'http\S+|@\S+', '', text).strip()
-    return f"{clean_text}{CUSTOM_FOOTER}"
+    # पहली लाइन उठाएं
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    first_line = lines[0] if lines else text
+
+    # साल (19xx या 20xx) निकालना
+    year_match = re.search(r'(19\d\d|20\d\d)', first_line)
+    year = f" ({year_match.group(1)})" if year_match else ""
+
+    # मूवी का नाम अलग करना
+    if year_match:
+        name = first_line[:year_match.start()].strip()
+    else:
+        # अगर साल न मिले तो ब्रैकेट्स या स्पेशल सिंबल से पहले का नाम
+        name = re.split(r'[\(\[\-#]', first_line)[0].strip()
+
+    # नाम से डॉट्स, अंडरस्कोर और फालतू चीजें साफ करना
+    name = re.sub(r'[\.\-_]', ' ', name).strip()
+
+    # क्वालिटी निकालना (480p, 720p, 1080p, 2160p, 4k, HEVC, HDTC आदि)
+    quality_match = re.search(r'(\d{3,4}p|4K|HEVC|HDR|HDTC)', text, re.IGNORECASE)
+    quality = f" [{quality_match.group(1).upper()}]" if quality_match else ""
+
+    return f"🎬 **{name}{year}{quality}**{CUSTOM_FOOTER}"
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
-    await message.reply_text("✅ Bot active hai! Ab koi bhi file forward ya send karo.")
+    await message.reply_text("✅ Bot active hai! Koi bhi movie file send karo (with ya without caption).")
 
 @app.on_message(filters.media & filters.private)
 async def process_media(client, message):
     try:
-        original_caption = message.caption or (message.document.file_name if message.document else "")
-        new_caption = clean_caption_text(original_caption)
+        # 1. पहले कैप्शन चेक करेगा
+        # 2. अगर कैप्शन नहीं है, तो Document का नाम देखेगा
+        # 3. अगर Video है, तो Video का फाइलनेम उठाएगा
+        file_name = ""
+        if message.document and message.document.file_name:
+            file_name = message.document.file_name
+        elif message.video and message.video.file_name:
+            file_name = message.video.file_name
+
+        original_text = message.caption or file_name or ""
+        new_caption = clean_caption_text(original_text)
         
         await message.copy(
             chat_id=TARGET_CHANNEL,
             caption=new_caption
         )
-        await message.reply_text("✅ File target channel me bhej di gayi hai!")
         await asyncio.sleep(2)
         
     except FloodWait as e:
@@ -59,7 +87,6 @@ async def process_media(client, message):
     except Exception as e:
         await message.reply_text(f"❌ Error: {e}")
 
-# Render ke port scan ko satisfy karne ke liye lightweight server
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -71,7 +98,6 @@ def run_web():
     httpd.serve_forever()
 
 if __name__ == "__main__":
-    # Web server alag thread me chalega
     threading.Thread(target=run_web, daemon=True).start()
     print("Bot starting via app.run()...")
     app.run()
