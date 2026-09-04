@@ -74,23 +74,31 @@ def clean_caption_text(text, fallback_id=None):
         tag = f" #ID_{fallback_id}" if fallback_id else ""
         caption = f"┏━━━━━━━━━━━━━━━━━┓\n🎬 **Update Name{tag}**\n┗━━━━━━━━━━━━━━━━━┛{CUSTOM_FOOTER}"
         return caption, f"Update Name{tag}"
-    
-    text = re.sub(r'\.(mkv|mp4|avi|webm|mov)$', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'https?://\S+|www\.\S+|t\.me/\S+', ' ', text)
-    text = re.sub(r'@[\w_]+', ' ', text)
-    text = re.sub(r'join\s+us\s+on\s+telegram', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'join\s+telegram', ' ', text, flags=re.IGNORECASE)
 
-    lines = [l.strip() for l in text.split('\n') if l.strip()]
-    raw_title = lines[0] if lines else text
+    # 1. Agar pehle se formatted caption hai (box design me se movie name nikalna)
+    movie_line_match = re.search(r'🎬\s*\**([^\*\n\r]+)', text)
+    if movie_line_match:
+        raw_title = movie_line_match.group(1).strip()
+    else:
+        text_clean = re.sub(r'\.(mkv|mp4|avi|webm|mov)$', '', text, flags=re.IGNORECASE)
+        text_clean = re.sub(r'https?://\S+|www\.\S+|t\.me/\S+', ' ', text_clean)
+        text_clean = re.sub(r'@[\w_]+', ' ', text_clean)
+        text_clean = re.sub(r'join\s+us\s+on\s+telegram', ' ', text_clean, flags=re.IGNORECASE)
+        text_clean = re.sub(r'join\s+telegram', ' ', text_clean, flags=re.IGNORECASE)
+        lines = [l.strip() for l in text_clean.split('\n') if l.strip() and not re.match(r'^[┏┗━\s]+$', l.strip())]
+        raw_title = lines[0] if lines else text_clean
+
     raw_title = re.sub(r'[\._]', ' ', raw_title)
 
+    # 2. Year Match (1950 - 2035)
     year_match = re.search(r'\b(19[5-9]\d|20[0-3]\d)\b', raw_title)
     year = f" ({year_match.group(1)})" if year_match else ""
 
+    # 3. Quality Match (1080p, 720p, 480p, 4K)
     res_match = re.search(r'(\d{3,4}p|4K)', raw_title, re.IGNORECASE)
     quality = f" [{res_match.group(1).upper()}]" if res_match else ""
 
+    # 4. Extract Clean Movie Name
     if year_match:
         name = raw_title[:year_match.start()].strip()
     elif res_match:
@@ -98,12 +106,12 @@ def clean_caption_text(text, fallback_id=None):
     else:
         name = re.split(r'[\(\[\-#]', raw_title)[0].strip()
 
-    name = re.sub(r'[\(\)\[\]\-_#|~★❤✔➔➜•:]+', ' ', name).strip()
+    name = re.sub(r'[\(\)\[\]\-_#|~★❤✔➔➜•:┏┗━*]+', ' ', name).strip()
     name = re.sub(r'\s+', ' ', name)
 
     if not name:
         tag = f" #ID_{fallback_id}" if fallback_id else ""
-        name = f"Update Name{tag}"
+        name = f"Movie{tag}"
 
     display_title = f"{name}{year}".strip()
     full_caption = (
@@ -116,10 +124,10 @@ def clean_caption_text(text, fallback_id=None):
 
 async def render_index_messages(data):
     sorted_movies = sorted(data["movies"].items(), key=lambda x: x[0].lower())
-    
+
     chunks = []
     lines = [f"• [{title}]({link})\n" for title, link in sorted_movies]
-    
+
     current_chunk = ""
     for line in lines:
         if len(current_chunk) + len(line) > 3500:
@@ -190,7 +198,7 @@ async def worker():
     while True:
         chat_id, msg_id = await task_queue.get()
         active_user_id = chat_id
-        
+
         try:
             msg = await app.get_messages(chat_id=chat_id, message_ids=msg_id)
         except FloodWait as e:
@@ -290,7 +298,7 @@ async def stats_handler(client, message):
 async def build_index_handler(client, message):
     status_msg = await message.reply_text("⏳ **Channel scan shuru ho gaya hai... Kripya 1-2 minute wait karein.**")
     clean_id = get_clean_channel_id(TARGET_CHANNEL)
-    data = load_index_data()
+    data = {"message_ids": data_loaded.get("message_ids", []) if (data_loaded := load_index_data()) else [], "movies": {}}
 
     try:
         temp_msg = await app.send_message(TARGET_CHANNEL, "🔍 Checking index...")
@@ -350,7 +358,6 @@ async def build_index_handler(client, message):
 async def process_media(client, message):
     await task_queue.put((message.chat.id, message.id))
 
-# HEAD & GET dono handle karega taaki 501 error na aaye
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.send_response(200)
