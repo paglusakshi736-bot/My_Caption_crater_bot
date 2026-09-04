@@ -49,50 +49,50 @@ def add_to_total_count(added_number):
 
 def clean_caption_text(text):
     if not text:
-        return f"🎬 **Movie**{CUSTOM_FOOTER}"
+        return f"┏━━━━━━━━━━━━━━━━━┓\n🎬 **Movie**\n┗━━━━━━━━━━━━━━━━━┛{CUSTOM_FOOTER}"
 
-    # 1. एक्सटेंशन और लिंक्स हटाना
+    # 1. एक्सटेंशन, लिंक्स और @user_name पूरी तरह हटाना
     text = re.sub(r'\.(mkv|mp4|avi|webm|mov)$', '', text, flags=re.IGNORECASE)
     text = re.sub(r'https?://\S+|www\.\S+|t\.me/\S+', ' ', text)
     text = re.sub(r'@[\w_]+', ' ', text)
 
-    # 2. आम प्रोमो लाइन साफ करना
-    text = re.sub(r'join\s+us\s+on\s+telegram', ' ', text, flags=re.IGNORECASE)
-    text = re.sub(r'join\s+telegram', ' ', text, flags=re.IGNORECASE)
+    # 2. आम प्रोमो टेक्स्ट हटाना
+    promo_regex = r'(join\s+us\s+on\s+telegram|join\s+telegram|join\s+channel|join\s+us|uploaded\s+by|exclusive|official|channel)'
+    text = re.sub(promo_regex, ' ', text, flags=re.IGNORECASE)
 
-    # पहली लाइन उठाएं
-    lines = [l.strip() for l in text.split('\n') if l.strip()]
-    first_line = lines[0] if lines else text
-
-    # 3. साल और रेजोल्यूशन ढूंढना
-    year_match = re.search(r'(19\d\d|20\d\d)', first_line)
-    year = f" ({year_match.group(1)})" if year_match else ""
-
-    res_match = re.search(r'(\d{3,4}p|4K)', text, re.IGNORECASE)
+    # 3. क्वालिटी ढूँढकर अलग सुरक्षित करना
+    res_match = re.search(r'(\d{3,4}p|4K|HEVC|HDR)', text, re.IGNORECASE)
+    quality = f" [{res_match.group(1).upper()}]" if res_match else ""
     if res_match:
-        quality = f" [{res_match.group(1).upper()}]"
-    else:
-        other_match = re.search(r'(HEVC|HDR)', text, re.IGNORECASE)
-        quality = f" [{other_match.group(1).upper()}]" if other_match else ""
+        text = text[:res_match.start()] + text[res_match.end():]
 
-    # 4. मूवी नाम निकालना (साल से पहले का हिस्सा)
+    # 4. साल (1950 - 2035) ढूँढकर अलग सुरक्षित करना
+    year_match = re.search(r'\b(19[5-9]\d|20[0-3]\d)\b', text)
+    year = f" ({year_match.group(1)})" if year_match else ""
     if year_match:
-        raw_name = first_line[:year_match.start()].strip()
-    elif res_match:
-        raw_name = first_line[:res_match.start()].strip()
-    else:
-        raw_name = re.split(r'[\(\[\-#]', first_line)[0].strip()
+        text = text[:year_match.start()] + text[year_match.end():]
 
-    # 5. नाम से फालतू सिंबल्स और डॉट्स साफ करना
-    name = re.sub(r'[\(\)\[\]\.\-_#|~★❤✔➔➜•]+', ' ', raw_name).strip()
-    name = re.sub(r'\s+', ' ', name)
+    # 5. ऑडियो/रिलीज़ टैग्स हटाना
+    tags = [
+        r'\bhindi\b', r'\btamil\b', r'\btelugu\b', r'\benglish\b', r'\borg\b',
+        r'\bclean\s+audio\b', r'\bdual\s+audio\b', r'\bv\d+\b', r'\bweb[\-\s]?dl\b',
+        r'\bbluray\b', r'\bhdrip\b', r'\brip\b', r'\bx264\b', r'\bx265\b', r'\baac\b',
+        r'\besub\b', r'\bsub\b'
+    ]
+    for tag in tags:
+        text = re.sub(tag, ' ', text, flags=re.IGNORECASE)
 
-    if not name:
-        name = "Movie"
+    # 6. स्पेशल सिंबल्स और खाली स्पेस साफ़ करना
+    clean_name = re.sub(r'[\(\)\[\]\.\-_#|~★❤✔➔➜•:/\\]+', ' ', text).strip()
+    clean_name = re.sub(r'\s+', ' ', clean_name)
+
+    # अगर फिर भी कुछ न बचे
+    if not clean_name:
+        clean_name = "Movie"
 
     return (
         f"┏━━━━━━━━━━━━━━━━━┓\n"
-        f"🎬 **{name}{year}{quality}**\n"
+        f"🎬 **{clean_name}{year}{quality}**\n"
         f"┗━━━━━━━━━━━━━━━━━┛"
         f"{CUSTOM_FOOTER}"
     )
