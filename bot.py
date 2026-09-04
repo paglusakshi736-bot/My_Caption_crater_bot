@@ -49,50 +49,28 @@ def add_to_total_count(added_number):
 
 def clean_caption_text(text):
     if not text:
-        return f"┏━━━━━━━━━━━━━━━━━┓\n🎬 **Movie**\n┗━━━━━━━━━━━━━━━━━┛{CUSTOM_FOOTER}"
+        return f"┏━━━━━━━━━━━━━━━━━┓\n🎬 **New Movie**\n┗━━━━━━━━━━━━━━━━━┛{CUSTOM_FOOTER}"
+    
+    # 1. पहली लाइन उठाना
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    first_line = lines[0] if lines else text
 
-    # 1. एक्सटेंशन, लिंक्स और @user_name पूरी तरह हटाना
-    text = re.sub(r'\.(mkv|mp4|avi|webm|mov)$', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'https?://\S+|www\.\S+|t\.me/\S+', ' ', text)
-    text = re.sub(r'@[\w_]+', ' ', text)
+    # 2. फ़ाइल एक्सटेंशन (.mkv, .mp4 आदि) हटाना
+    first_line = re.sub(r'\.(mkv|mp4|avi|webm|mov)$', '', first_line, flags=re.IGNORECASE)
 
-    # 2. आम प्रोमो टेक्स्ट हटाना
-    promo_regex = r'(join\s+us\s+on\s+telegram|join\s+telegram|join\s+channel|join\s+us|uploaded\s+by|exclusive|official|channel)'
-    text = re.sub(promo_regex, ' ', text, flags=re.IGNORECASE)
+    # 3. सिर्फ लिंक्स और @usernames को हटाना
+    first_line = re.sub(r'https?://\S+|www\.\S+|t\.me/\S+', '', first_line)
+    first_line = re.sub(r'@[\w_]+', '', first_line)
 
-    # 3. क्वालिटी ढूँढकर अलग सुरक्षित करना
-    res_match = re.search(r'(\d{3,4}p|4K|HEVC|HDR)', text, re.IGNORECASE)
-    quality = f" [{res_match.group(1).upper()}]" if res_match else ""
-    if res_match:
-        text = text[:res_match.start()] + text[res_match.end():]
+    # 4. एक्स्ट्रा स्पेसेस साफ़ करना (नाम को बिना काटे सुरक्षित रखना)
+    cleaned_title = re.sub(r'\s+', ' ', first_line).strip()
 
-    # 4. साल (1950 - 2035) ढूँढकर अलग सुरक्षित करना
-    year_match = re.search(r'\b(19[5-9]\d|20[0-3]\d)\b', text)
-    year = f" ({year_match.group(1)})" if year_match else ""
-    if year_match:
-        text = text[:year_match.start()] + text[year_match.end():]
-
-    # 5. ऑडियो/रिलीज़ टैग्स हटाना
-    tags = [
-        r'\bhindi\b', r'\btamil\b', r'\btelugu\b', r'\benglish\b', r'\borg\b',
-        r'\bclean\s+audio\b', r'\bdual\s+audio\b', r'\bv\d+\b', r'\bweb[\-\s]?dl\b',
-        r'\bbluray\b', r'\bhdrip\b', r'\brip\b', r'\bx264\b', r'\bx265\b', r'\baac\b',
-        r'\besub\b', r'\bsub\b'
-    ]
-    for tag in tags:
-        text = re.sub(tag, ' ', text, flags=re.IGNORECASE)
-
-    # 6. स्पेशल सिंबल्स और खाली स्पेस साफ़ करना
-    clean_name = re.sub(r'[\(\)\[\]\.\-_#|~★❤✔➔➜•:/\\]+', ' ', text).strip()
-    clean_name = re.sub(r'\s+', ' ', clean_name)
-
-    # अगर फिर भी कुछ न बचे
-    if not clean_name:
-        clean_name = "Movie"
+    if not cleaned_title:
+        cleaned_title = "New Movie"
 
     return (
         f"┏━━━━━━━━━━━━━━━━━┓\n"
-        f"🎬 **{clean_name}{year}{quality}**\n"
+        f"🎬 **{cleaned_title}**\n"
         f"┗━━━━━━━━━━━━━━━━━┛"
         f"{CUSTOM_FOOTER}"
     )
@@ -145,6 +123,7 @@ async def worker():
                 print(f"Skipping file due to error: {e}")
                 break
 
+        # हर 50 फाइल्स पर अपडेट
         if batch_count >= 50:
             total = add_to_total_count(batch_count)
             try:
@@ -164,6 +143,7 @@ async def worker():
         task_queue.task_done()
         await asyncio.sleep(2.5)
 
+        # पूरी कतार खाली होने पर मैसेज
         if task_queue.empty() and batch_count > 0:
             total = add_to_total_count(batch_count)
             try:
