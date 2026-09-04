@@ -49,64 +49,46 @@ def add_to_total_count(added_number):
 
 def clean_caption_text(text):
     if not text:
-        return f"🎬 **New Movie**{CUSTOM_FOOTER}"
+        return f"🎬 **Movie**{CUSTOM_FOOTER}"
 
-    # 1. फाइल एक्सटेंशन हटाना
+    # 1. एक्सटेंशन और लिंक्स हटाना
     text = re.sub(r'\.(mkv|mp4|avi|webm|mov)$', '', text, flags=re.IGNORECASE)
-
-    # 2. सभी प्रकार के लिंक्स और टेलीग्राम यूजरनेम्स हटाना
     text = re.sub(r'https?://\S+|www\.\S+|t\.me/\S+', ' ', text)
     text = re.sub(r'@[\w_]+', ' ', text)
 
-    # 3. चैनलों द्वारा इस्तेमाल किए जाने वाले आम प्रोमो शब्द
-    junk_promo = [
-        r'join\s+us\s+on\s+telegram', r'join\s+telegram', r'join\s+channel',
-        r'join\s+us', r'join', r'telegram', r'official', r'channel',
-        r'uploaded\s+by', r'exclusive', r'share', r'subscribe', r'link',
-        r'bollywood', r'hollywood', r'south', r'full\s+movie'
-    ]
-    for promo in junk_promo:
-        text = re.sub(r'\b' + promo + r'\b', ' ', text, flags=re.IGNORECASE)
+    # 2. आम प्रोमो लाइन साफ करना
+    text = re.sub(r'join\s+us\s+on\s+telegram', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'join\s+telegram', ' ', text, flags=re.IGNORECASE)
 
-    # 4. पहली लाइन से नाम और साल निकालना
+    # पहली लाइन उठाएं
     lines = [l.strip() for l in text.split('\n') if l.strip()]
     first_line = lines[0] if lines else text
 
-    # साल (19xx या 20xx) खोजना
+    # 3. साल और रेजोल्यूशन ढूंढना
     year_match = re.search(r'(19\d\d|20\d\d)', first_line)
     year = f" ({year_match.group(1)})" if year_match else ""
 
-    if year_match:
-        name = first_line[:year_match.start()].strip()
-    else:
-        # अगर साल न मिले तो ब्रैकेट्स या सेपरेटर से पहले का हिस्सा
-        name = re.split(r'[\(\[\-#]', first_line)[0].strip()
-
-    # 5. मूवी नाम के बीच से ऑडियो/रिलीज़ टैग्स हटाना
-    tech_tags = [
-        r'hindi', r'tamil', r'telugu', r'english', r'org', r'line',
-        r'dual\s+audio', r'clean\s+audio', r'v\d+', r'hq', r'proper',
-        r'web[\-\s]?dl', r'bluray', r'hdrip', r'rip', r'x264', r'x265',
-        r'aac', r'esub', r'sub', r'mkv', r'mp4'
-    ]
-    for tag in tech_tags:
-        name = re.sub(r'\b' + tag + r'\b', ' ', name, flags=re.IGNORECASE)
-
-    # 6. सिंबल्स, इमोजी और फालतू स्पेस की सफाई
-    name = re.sub(r'[\(\)\[\]\.\-_#|~★❤✔➔➜•]+', ' ', name).strip()
-    name = re.sub(r'\s+', ' ', name)
-
-    # अगर नाम खाली रह जाए तो बैकअप नाम
-    if not name:
-        name = "Movie"
-
-    # 7. असली क्वालिटी डिटेक्ट करना (Priority: 4K > 1080p > 720p > 480p)
     res_match = re.search(r'(\d{3,4}p|4K)', text, re.IGNORECASE)
     if res_match:
         quality = f" [{res_match.group(1).upper()}]"
     else:
         other_match = re.search(r'(HEVC|HDR)', text, re.IGNORECASE)
         quality = f" [{other_match.group(1).upper()}]" if other_match else ""
+
+    # 4. मूवी नाम निकालना (साल से पहले का हिस्सा)
+    if year_match:
+        raw_name = first_line[:year_match.start()].strip()
+    elif res_match:
+        raw_name = first_line[:res_match.start()].strip()
+    else:
+        raw_name = re.split(r'[\(\[\-#]', first_line)[0].strip()
+
+    # 5. नाम से फालतू सिंबल्स और डॉट्स साफ करना
+    name = re.sub(r'[\(\)\[\]\.\-_#|~★❤✔➔➜•]+', ' ', raw_name).strip()
+    name = re.sub(r'\s+', ' ', name)
+
+    if not name:
+        name = "Movie"
 
     return (
         f"┏━━━━━━━━━━━━━━━━━┓\n"
@@ -163,7 +145,6 @@ async def worker():
                 print(f"Skipping file due to error: {e}")
                 break
 
-        # हर 50 फाइल्स पर प्रोग्रेस अपडेट
         if batch_count >= 50:
             total = add_to_total_count(batch_count)
             try:
@@ -183,7 +164,6 @@ async def worker():
         task_queue.task_done()
         await asyncio.sleep(2.5)
 
-        # पूरी कतार खाली होने पर अंतिम मैसेज
         if task_queue.empty() and batch_count > 0:
             total = add_to_total_count(batch_count)
             try:
