@@ -75,7 +75,6 @@ def clean_caption_text(text, fallback_id=None):
         caption = f"┏━━━━━━━━━━━━━━━━━┓\n🎬 **Update Name{tag}**\n┗━━━━━━━━━━━━━━━━━┛{CUSTOM_FOOTER}"
         return caption, f"Update Name{tag}"
 
-    # 1. Agar pehle se formatted caption hai (box design me se movie name nikalna)
     movie_line_match = re.search(r'🎬\s*\**([^\*\n\r]+)', text)
     if movie_line_match:
         raw_title = movie_line_match.group(1).strip()
@@ -90,15 +89,12 @@ def clean_caption_text(text, fallback_id=None):
 
     raw_title = re.sub(r'[\._]', ' ', raw_title)
 
-    # 2. Year Match (1950 - 2035)
     year_match = re.search(r'\b(19[5-9]\d|20[0-3]\d)\b', raw_title)
     year = f" ({year_match.group(1)})" if year_match else ""
 
-    # 3. Quality Match (1080p, 720p, 480p, 4K)
     res_match = re.search(r'(\d{3,4}p|4K)', raw_title, re.IGNORECASE)
     quality = f" [{res_match.group(1).upper()}]" if res_match else ""
 
-    # 4. Extract Clean Movie Name
     if year_match:
         name = raw_title[:year_match.start()].strip()
     elif res_match:
@@ -179,22 +175,15 @@ async def render_index_messages(data):
 
     save_index_data(data)
 
-async def update_master_index(display_title, post_id):
-    data = load_index_data()
-    clean_id = get_clean_channel_id(TARGET_CHANNEL)
-    post_link = f"https://t.me/c/{clean_id}/{post_id}"
-
-    if display_title in data["movies"]:
-        return
-    data["movies"][display_title] = post_link
-    await render_index_messages(data)
-
 task_queue = asyncio.Queue()
 batch_count = 0
 active_user_id = None
 
+# सुपर-फास्ट और सेफ़ वर्कर सिस्टम
 async def worker():
     global batch_count, active_user_id
+    pending_index_updates = 0
+
     while True:
         chat_id, msg_id = await task_queue.get()
         active_user_id = chat_id
@@ -231,7 +220,21 @@ async def worker():
                 )
                 success = True
                 batch_count += 1
-                await update_master_index(display_title, copied_msg.id)
+
+                data = load_index_data()
+                clean_id = get_clean_channel_id(TARGET_CHANNEL)
+                post_link = f"https://t.me/c/{clean_id}/{copied_msg.id}"
+
+                if display_title not in data["movies"]:
+                    data["movies"][display_title] = post_link
+                    save_index_data(data)
+                    pending_index_updates += 1
+
+                # हर 10 फाइल्स के बाद इंडेक्स अपडेट करेगा ताकि स्पीड न गिरे
+                if pending_index_updates >= 10:
+                    await render_index_messages(data)
+                    pending_index_updates = 0
+
             except FloodWait as e:
                 await asyncio.sleep(e.value + 2)
             except Exception as e:
@@ -255,23 +258,30 @@ async def worker():
             batch_count = 0
 
         task_queue.task_done()
-        await asyncio.sleep(2.5)
+        # सेफ़ और फ़ास्ट डिले (2.5s से घटाकर 0.8s)
+        await asyncio.sleep(0.8)
 
-        if task_queue.empty() and batch_count > 0:
-            total = add_to_total_count(batch_count)
-            try:
-                await app.send_message(
-                    chat_id=active_user_id,
-                    text=(
-                        f"🎉 **Sabhi Files Complete Ho Gayi Hain!**\n\n"
-                        f"📥 Last Batch: **{batch_count} files**\n"
-                        f"📊 Total Files in Channel: **{total}**\n"
-                        f"✨ Queue bilkul khali ho chuki hai."
+        if task_queue.empty():
+            if pending_index_updates > 0:
+                data = load_index_data()
+                await render_index_messages(data)
+                pending_index_updates = 0
+
+            if batch_count > 0:
+                total = add_to_total_count(batch_count)
+                try:
+                    await app.send_message(
+                        chat_id=active_user_id,
+                        text=(
+                            f"🎉 **Sabhi Files Complete Ho Gayi Hain!**\n\n"
+                            f"📥 Last Batch: **{batch_count} files**\n"
+                            f"📊 Total Files in Channel: **{total}**\n"
+                            f"✨ Queue bilkul khali ho chuki hai."
+                        )
                     )
-                )
-            except Exception:
-                pass
-            batch_count = 0
+                except Exception:
+                    pass
+                batch_count = 0
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
