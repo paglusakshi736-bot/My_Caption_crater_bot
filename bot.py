@@ -9,6 +9,7 @@ from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
 
+# --- Environment Variables ---
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -17,6 +18,7 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 PORT = int(os.environ.get("PORT", 8080))
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
+# --- Storage Files ---
 STATS_FILE = "stats.json"
 INDEX_FILE = "index_data.json"
 CONFIG_FILE = "config.json"
@@ -36,6 +38,7 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
+# --- Channel Configuration Helpers ---
 def get_target_channel():
     if os.path.exists(CONFIG_FILE):
         try:
@@ -49,6 +52,7 @@ def set_target_channel_id(new_id):
     with open(CONFIG_FILE, "w") as f:
         json.dump({"target_channel": new_id}, f)
 
+# --- Statistics Helpers ---
 def get_total_count():
     if os.path.exists(STATS_FILE):
         try:
@@ -64,6 +68,7 @@ def add_to_total_count(added_number):
         json.dump({"total_processed": current}, f)
     return current
 
+# --- User Tracking Helpers ---
 def load_users():
     if os.path.exists(USERS_FILE):
         try:
@@ -80,6 +85,7 @@ def save_user(user_id):
         with open(USERS_FILE, "w") as f:
             json.dump(list(users), f)
 
+# --- Index Data Helpers ---
 def load_index_data():
     if os.path.exists(INDEX_FILE):
         try:
@@ -101,6 +107,7 @@ def get_clean_channel_id(channel_id):
         return s[1:]
     return s
 
+# --- Security Filter ---
 def is_admin(_, __, message):
     if not ADMIN_ID:
         return True
@@ -108,6 +115,41 @@ def is_admin(_, __, message):
 
 admin_filter = filters.create(is_admin)
 
+# --- Deep File Name Extractor (Handles Hidden Media Attributes) ---
+def extract_real_file_name(msg):
+    if not msg:
+        return ""
+
+    # 1. Check Caption
+    if msg.caption and msg.caption.strip():
+        return msg.caption
+
+    # 2. Check Document File Name
+    if msg.document and msg.document.file_name:
+        return msg.document.file_name
+
+    # 3. Check Video File Name & Attributes
+    if msg.video:
+        if getattr(msg.video, 'file_name', None):
+            return msg.video.file_name
+        if hasattr(msg.video, 'attributes') and msg.video.attributes:
+            for attr in msg.video.attributes:
+                fn = getattr(attr, 'file_name', None)
+                if fn:
+                    return fn
+
+    # 4. Check Forward Headers
+    if msg.forward_from_chat and msg.forward_from_message_id:
+        try:
+            fwd = app.get_messages(msg.forward_from_chat.id, msg.forward_from_message_id)
+            if fwd and fwd.caption:
+                return fwd.caption
+        except Exception:
+            pass
+
+    return ""
+
+# --- Caption Cleaner & Formatter ---
 def clean_caption_text(text, fallback_id=None):
     if not text or not text.strip():
         tag = f" #ID_{fallback_id}" if fallback_id else ""
@@ -165,6 +207,7 @@ def clean_caption_text(text, fallback_id=None):
     signature = f"{display_title}_{quality_tag}".lower().strip()
     return full_caption, display_title, signature
 
+# --- Index Generator & Auto-Pinner ---
 async def render_index_messages(data):
     target = get_target_channel()
     sorted_movies = sorted(data["movies"].items(), key=lambda x: x[0].lower())
@@ -223,6 +266,7 @@ async def render_index_messages(data):
 
     save_index_data(data)
 
+# --- Background Worker ---
 task_queue = asyncio.Queue()
 batch_count = 0
 duplicate_skipped_count = 0
@@ -250,30 +294,13 @@ async def worker():
             task_queue.task_done()
             continue
 
-        original_text = msg.caption or ""
-        if not original_text:
-            if msg.document and msg.document.file_name:
-                original_text = msg.document.file_name
-            elif msg.video:
-                original_text = getattr(msg.video, 'file_name', None) or ""
-                if not original_text and hasattr(msg.video, 'attributes'):
-                    for attr in msg.video.attributes:
-                        if hasattr(attr, 'file_name') and attr.file_name:
-                            original_text = attr.file_name
-                            break
-            if not original_text and msg.forward_from_chat and msg.forward_from_message_id:
-                try:
-                    fwd_msg = await app.get_messages(msg.forward_from_chat.id, msg.forward_from_message_id)
-                    if fwd_msg and fwd_msg.caption:
-                        original_text = fwd_msg.caption
-                except Exception:
-                    pass
-
+        original_text = extract_real_file_name(msg)
         new_caption, display_title, signature = clean_caption_text(original_text, fallback_id=msg.id)
 
         data = load_index_data()
         existing_sigs = set(data.get("existing_signatures", []))
 
+        # Check duplicate
         if signature in existing_sigs and not signature.startswith("update_name_"):
             duplicate_skipped_count += 1
             task_queue.task_done()
@@ -357,6 +384,7 @@ async def worker():
                 batch_count = 0
                 duplicate_skipped_count = 0
 
+# --- Command Handlers ---
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     save_user(message.from_user.id)
@@ -448,13 +476,7 @@ async def remove_duplicates_handler(client, message):
                 continue
             scanned += 1
             if post.document or post.video:
-                raw = post.caption or ""
-                if not raw:
-                    if post.document and post.document.file_name:
-                        raw = post.document.file_name
-                    elif post.video and getattr(post.video, 'file_name', None):
-                        raw = post.video.file_name
-
+                raw = extract_real_file_name(post)
                 _, _, sig = clean_caption_text(raw, fallback_id=post.id)
                 if not sig or sig.startswith("update_name_"):
                     continue
@@ -523,12 +545,7 @@ async def fix_captions_handler(client, message):
 
             caption = post.caption or ""
             if ("Movie #ID_" in caption) or ("Update Name" in caption):
-                real_file_name = ""
-                if post.document and post.document.file_name:
-                    real_file_name = post.document.file_name
-                elif post.video and getattr(post.video, 'file_name', None):
-                    real_file_name = post.video.file_name
-
+                real_file_name = extract_real_file_name(post)
                 if real_file_name:
                     new_caption, _, _ = clean_caption_text(real_file_name, fallback_id=post.id)
                     try:
@@ -582,13 +599,7 @@ async def build_index_handler(client, message):
                     continue
                 scanned += 1
                 if post.document or post.video:
-                    raw = post.caption or ""
-                    if not raw or "Movie #ID_" in raw or "Update Name" in raw:
-                        if post.document and post.document.file_name:
-                            raw = post.document.file_name
-                        elif post.video and getattr(post.video, 'file_name', None):
-                            raw = post.video.file_name
-
+                    raw = extract_real_file_name(post)
                     _, display_title, sig = clean_caption_text(raw, fallback_id=post.id)
                     if display_title not in data["movies"]:
                         data["movies"][display_title] = f"https://t.me/c/{clean_id}/{post.id}"
@@ -611,10 +622,12 @@ async def build_index_handler(client, message):
     except Exception as e:
         await status_msg.edit_text(f"❌ Index banane me error: {e}")
 
+# Media Handler
 @app.on_message(filters.media & filters.private & admin_filter)
 async def process_media(client, message):
     await task_queue.put((message.chat.id, message.id))
 
+# Web Server & Keep-Alive
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.send_response(200)
