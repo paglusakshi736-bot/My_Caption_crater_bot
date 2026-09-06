@@ -12,7 +12,6 @@ from pyrogram.errors import FloodWait
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-# Environment se default channel aur admin
 DEFAULT_TARGET_CHANNEL = int(os.environ.get("TARGET_CHANNEL"))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 PORT = int(os.environ.get("PORT", 8080))
@@ -102,7 +101,6 @@ def get_clean_channel_id(channel_id):
         return s[1:]
     return s
 
-# Custom Admin Filter
 def is_admin(_, __, message):
     if not ADMIN_ID:
         return True
@@ -252,7 +250,7 @@ async def worker():
             task_queue.task_done()
             continue
 
-                original_text = msg.caption or ""
+        original_text = msg.caption or ""
         if not original_text:
             if msg.document and msg.document.file_name:
                 original_text = msg.document.file_name
@@ -270,7 +268,7 @@ async def worker():
                         original_text = fwd_msg.caption
                 except Exception:
                     pass
-                    
+
         new_caption, display_title, signature = clean_caption_text(original_text, fallback_id=msg.id)
 
         data = load_index_data()
@@ -359,7 +357,6 @@ async def worker():
                 batch_count = 0
                 duplicate_skipped_count = 0
 
-# Start Command (Sabhi ke liye visible, users save honge)
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     save_user(message.from_user.id)
@@ -382,7 +379,6 @@ async def start_handler(client, message):
         f"• `/fix_captions` - Corrupt caption theek karein"
     )
 
-# Dynamic Channel Changer Command
 @app.on_message(filters.command("set_channel") & filters.private & admin_filter)
 async def set_channel_handler(client, message):
     if len(message.command) < 2:
@@ -402,7 +398,6 @@ async def set_channel_handler(client, message):
     except ValueError:
         await message.reply_text("❌ Galat Channel ID! ID number me honi chahiye (jaise `-1001234567890`).")
 
-# Bot Users Counter Command
 @app.on_message(filters.command("users") & filters.private & admin_filter)
 async def users_handler(client, message):
     users = load_users()
@@ -616,7 +611,6 @@ async def build_index_handler(client, message):
     except Exception as e:
         await status_msg.edit_text(f"❌ Index banane me error: {e}")
 
-# Media Handler (Sirf Admin bhej sakega)
 @app.on_message(filters.media & filters.private & admin_filter)
 async def process_media(client, message):
     await task_queue.put((message.chat.id, message.id))
