@@ -252,13 +252,25 @@ async def worker():
             task_queue.task_done()
             continue
 
-        original_text = msg.caption or ""
+                original_text = msg.caption or ""
         if not original_text:
-            if msg.document:
-                original_text = msg.document.file_name or ""
+            if msg.document and msg.document.file_name:
+                original_text = msg.document.file_name
             elif msg.video:
-                original_text = getattr(msg.video, 'file_name', None) or getattr(msg.video, 'file_name', '')
-
+                original_text = getattr(msg.video, 'file_name', None) or ""
+                if not original_text and hasattr(msg.video, 'attributes'):
+                    for attr in msg.video.attributes:
+                        if hasattr(attr, 'file_name') and attr.file_name:
+                            original_text = attr.file_name
+                            break
+            if not original_text and msg.forward_from_chat and msg.forward_from_message_id:
+                try:
+                    fwd_msg = await app.get_messages(msg.forward_from_chat.id, msg.forward_from_message_id)
+                    if fwd_msg and fwd_msg.caption:
+                        original_text = fwd_msg.caption
+                except Exception:
+                    pass
+                    
         new_caption, display_title, signature = clean_caption_text(original_text, fallback_id=msg.id)
 
         data = load_index_data()
