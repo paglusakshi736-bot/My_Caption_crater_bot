@@ -7,6 +7,7 @@ import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import FloodWait
 
 API_ID = int(os.environ.get("API_ID"))
@@ -21,6 +22,7 @@ STATS_FILE = "stats.json"
 INDEX_FILE = "index_data.json"
 CONFIG_FILE = "config.json"
 USERS_FILE = "users.json"
+PENDING_DUPLICATES_FILE = "pending_duplicates.json"
 
 CUSTOM_FOOTER = (
     "\n\n"
@@ -115,28 +117,29 @@ async def extract_real_file_name(msg):
     if msg.caption and msg.caption.strip():
         return msg.caption
 
-    if msg.document and msg.document.file_name:
+    if msg.document and getattr(msg.document, 'file_name', None):
         return msg.document.file_name
 
-    if msg.video:
-        if getattr(msg.video, 'file_name', None):
-            return msg.video.file_name
-        if hasattr(msg.video, 'attributes') and msg.video.attributes:
-            for attr in msg.video.attributes:
-                fn = getattr(attr, 'file_name', None)
-                if fn:
-                    return fn
+    if msg.video and getattr(msg.video, 'file_name', None):
+        return msg.video.file_name
 
     try:
         media = getattr(msg, 'video', None) or getattr(msg, 'document', None)
         if media:
-            for key in ['attributes', 'raw']:
-                obj = getattr(media, key, None)
-                if obj and isinstance(obj, list):
-                    for item in obj:
-                        fn = getattr(item, 'file_name', None)
-                        if fn:
-                            return fn
+            attrs = getattr(media, 'attributes', None) or []
+            for attr in attrs:
+                fn = getattr(attr, 'file_name', None)
+                if fn:
+                    return fn
+
+        raw = getattr(msg, '_raw', None) or getattr(msg, 'raw', None)
+        if raw and hasattr(raw, 'media'):
+            doc = getattr(raw.media, 'document', None)
+            if doc and hasattr(doc, 'attributes'):
+                for attr in doc.attributes:
+                    fn = getattr(attr, 'file_name', None)
+                    if fn:
+                        return fn
     except Exception:
         pass
 
@@ -400,7 +403,7 @@ async def start_handler(client, message):
         f"• `/set_channel <id>` - Target channel badlein\n"
         f"• `/users` - Total Bot Users check karein\n"
         f"• `/stats` - Live Queue & Files check karein\n"
-        f"• `/remove_duplicates` - Duplicate files clean karein\n"
+        f"• `/remove_duplicates` - Duplicates scan & mark karein\n"
         f"• `/build_index` - Master Index refresh karein\n"
         f"• `/fix_captions` - Corrupt caption theek karein"
     )
@@ -444,7 +447,8 @@ async def stats_handler(client, message):
 @app.on_message(filters.command("remove_duplicates") & filters.private & admin_filter)
 async def remove_duplicates_handler(client, message):
     target = get_target_channel()
-    status_msg = await message.reply_text("🔍 **Channel me duplicate files check ho rahi hain...**")
+    clean_id = get_clean_channel_id(target)
+    status_msg = await message.reply_text("🔍 **Channel me duplicate files scan ho rahi hain... Kripya intezar karein.**")
 
     try:
         temp_msg = await app.send_message(target, "🔍 Scanning...")
@@ -455,7 +459,7 @@ async def remove_duplicates_handler(client, message):
         return
 
     seen_signatures = {}
-    duplicates_to_delete = []
+    duplicates_to_mark = []
     scanned = 0
     batch_size = 100
 
@@ -475,41 +479,126 @@ async def remove_duplicates_handler(client, message):
             scanned += 1
             if post.document or post.video:
                 raw = await extract_real_file_name(post)
-                _, _, sig = clean_caption_text(raw, fallback_id=post.id)
+                _, title, sig = clean_caption_text(raw, fallback_id=post.id)
                 if not sig or sig.startswith("update_name_"):
                     continue
 
                 if sig in seen_signatures:
-                    duplicates_to_delete.append(post.id)
+                    orig_id = seen_signatures[sig]
+                    duplicates_to_mark.append({
+                        "dup_id": post.id,
+                        "orig_id": orig_id,
+                        "title": title,
+                        "old_caption": post.caption or ""
+                    })
                 else:
                     seen_signatures[sig] = post.id
 
+    if not duplicates_to_mark:
+        await status_msg.edit_text(f"✅ **Koi Duplicate File Nahi Mili!**\n\n🔍 Messages Scanned: **{scanned}**\n✨ Sabhi files unique hain.")
+        return
+
+    await status_msg.edit_text(f"⚠️ **{len(duplicates_to_mark)} Duplicates mili hain!**\nUn par Tag lagaya ja raha hai...")
+
+    for item in duplicates_to_mark:
+        dup_id = item["dup_id"]
+        orig_id = item["orig_id"]
+        cur_cap = item["old_caption"]
+
+        if "DUPLICATE_FILE" not in cur_cap:
+            marked_caption = f"⚠️ **#DUPLICATE_FILE** (Original Post: `#ID_{orig_id}`)\n\n" + cur_cap
+            try:
+                await app.edit_message_caption(
+                    chat_id=target,
+                    message_id=dup_id,
+                    caption=marked_caption,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                await asyncio.sleep(0.8)
+            except FloodWait as e:
+                await asyncio.sleep(e.value + 1)
+                try:
+                    await app.edit_message_caption(
+                        chat_id=target,
+                        message_id=dup_id,
+                        caption=marked_caption,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    with open(PENDING_DUPLICATES_FILE, "w") as f:
+        json.dump([d["dup_id"] for d in duplicates_to_mark], f)
+
+    report_lines = []
+    for idx, d in enumerate(duplicates_to_mark[:10], 1):
+        report_lines.append(
+            f"{idx}. 🎬 **{d['title']}**\n"
+            f"   • Original: [Post #{d['orig_id']}](https://t.me/c/{clean_id}/{d['orig_id']})\n"
+            f"   • Duplicate: [Post #{d['dup_id']}](https://t.me/c/{clean_id}/{d['dup_id']})"
+        )
+
+    more_text = f"\n...aur **{len(duplicates_to_mark) - 10}** aur files." if len(duplicates_to_mark) > 10 else ""
+    report_text = (
+        f"📋 **Duplicate Files Review List:**\n\n"
+        + "\n\n".join(report_lines)
+        + more_text + "\n\n"
+        f"⚠️ Sabhi {len(duplicates_to_mark)} duplicate posts par `#DUPLICATE_FILE` tag laga diya gaya hai.\n"
+        f"Agar aap in sabhi duplicates ko ek sath channel se delete karna chahte hain, to niche diye gaye button par click karein:"
+    )
+
+    btn = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ Confirm Delete All Duplicates", callback_data="delete_all_duplicates")]
+    ])
+    await message.reply_text(report_text, reply_markup=btn, disable_web_page_preview=True)
+
+@app.on_callback_query(filters.regex("^delete_all_duplicates$"))
+async def handle_delete_duplicates_callback(client, callback_query: CallbackQuery):
+    if not is_admin(None, None, callback_query):
+        await callback_query.answer("⛔ Sirf Admin yeh action le sakta hai!", show_alert=True)
+        return
+
+    if not os.path.exists(PENDING_DUPLICATES_FILE):
+        await callback_query.answer("❌ Koi pending duplicates nahi mile!", show_alert=True)
+        return
+
+    with open(PENDING_DUPLICATES_FILE, "r") as f:
+        del_ids = json.load(f)
+
+    if not del_ids:
+        await callback_query.answer("❌ List pehle se empty hai!", show_alert=True)
+        return
+
+    await callback_query.message.edit_reply_markup(reply_markup=None)
+    await callback_query.message.reply_text(f"⏳ **{len(del_ids)} duplicates channel se delete ho rahe hain...**")
+
+    target = get_target_channel()
     deleted_count = 0
-    for del_id in duplicates_to_delete:
+
+    for d_id in del_ids:
         try:
-            await app.delete_messages(chat_id=target, message_ids=del_id)
+            await app.delete_messages(chat_id=target, message_ids=d_id)
             deleted_count += 1
             await asyncio.sleep(0.5)
         except FloodWait as e:
             await asyncio.sleep(e.value + 1)
             try:
-                await app.delete_messages(chat_id=target, message_ids=del_id)
+                await app.delete_messages(chat_id=target, message_ids=d_id)
                 deleted_count += 1
             except Exception:
                 pass
         except Exception:
             pass
 
-    data = load_index_data()
-    data["existing_signatures"] = list(seen_signatures.keys())
-    save_index_data(data)
+    if os.path.exists(PENDING_DUPLICATES_FILE):
+        os.remove(PENDING_DUPLICATES_FILE)
 
-    await status_msg.edit_text(
-        f"🗑️ **Duplicate Clean-up Complete!**\n\n"
-        f"🔍 Messages Scanned: **{scanned}**\n"
-        f"🗑️ Duplicates Removed: **{deleted_count} files**\n"
-        f"✅ Unique Files Safe: **{len(seen_signatures)} files**\n\n"
-        f"👉 Ek baar **/build_index** bhej dein."
+    await callback_query.message.reply_text(
+        f"🎉 **Clean-up Successful!**\n\n"
+        f"🗑️ Total **{deleted_count} duplicate files** channel se delete ho chuki hain!\n"
+        f"👉 Ab ek baar **/build_index** bhej dein taaki list refresh ho jaye."
     )
 
 @app.on_message(filters.command("fix_captions") & filters.private & admin_filter)
