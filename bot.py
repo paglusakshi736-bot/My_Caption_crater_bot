@@ -12,12 +12,16 @@ from pyrogram.errors import FloodWait
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-TARGET_CHANNEL = int(os.environ.get("TARGET_CHANNEL"))
+# Environment se default channel aur admin
+DEFAULT_TARGET_CHANNEL = int(os.environ.get("TARGET_CHANNEL"))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 PORT = int(os.environ.get("PORT", 8080))
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 STATS_FILE = "stats.json"
 INDEX_FILE = "index_data.json"
+CONFIG_FILE = "config.json"
+USERS_FILE = "users.json"
 
 CUSTOM_FOOTER = (
     "\n\n"
@@ -33,6 +37,19 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
+def get_target_channel():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                return json.load(f).get("target_channel", DEFAULT_TARGET_CHANNEL)
+        except Exception:
+            return DEFAULT_TARGET_CHANNEL
+    return DEFAULT_TARGET_CHANNEL
+
+def set_target_channel_id(new_id):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump({"target_channel": new_id}, f)
+
 def get_total_count():
     if os.path.exists(STATS_FILE):
         try:
@@ -47,6 +64,22 @@ def add_to_total_count(added_number):
     with open(STATS_FILE, "w") as f:
         json.dump({"total_processed": current}, f)
     return current
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r") as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
+    return set()
+
+def save_user(user_id):
+    users = load_users()
+    if user_id not in users:
+        users.add(user_id)
+        with open(USERS_FILE, "w") as f:
+            json.dump(list(users), f)
 
 def load_index_data():
     if os.path.exists(INDEX_FILE):
@@ -68,6 +101,14 @@ def get_clean_channel_id(channel_id):
     elif s.startswith("-"):
         return s[1:]
     return s
+
+# Custom Admin Filter
+def is_admin(_, __, message):
+    if not ADMIN_ID:
+        return True
+    return message.from_user and message.from_user.id == ADMIN_ID
+
+admin_filter = filters.create(is_admin)
 
 def clean_caption_text(text, fallback_id=None):
     if not text or not text.strip():
@@ -123,11 +164,11 @@ def clean_caption_text(text, fallback_id=None):
         f"┗━━━━━━━━━━━━━━━━━┛"
         f"{CUSTOM_FOOTER}"
     )
-    # Signature unique pehchan ke liye (naam + quality)
     signature = f"{display_title}_{quality_tag}".lower().strip()
     return full_caption, display_title, signature
 
 async def render_index_messages(data):
+    target = get_target_channel()
     sorted_movies = sorted(data["movies"].items(), key=lambda x: x[0].lower())
 
     chunks = []
@@ -153,7 +194,7 @@ async def render_index_messages(data):
         if idx < len(data["message_ids"]):
             try:
                 await app.edit_message_text(
-                    chat_id=TARGET_CHANNEL,
+                    chat_id=target,
                     message_id=data["message_ids"][idx],
                     text=chunk_text,
                     disable_web_page_preview=True,
@@ -166,7 +207,7 @@ async def render_index_messages(data):
         else:
             try:
                 sent = await app.send_message(
-                    chat_id=TARGET_CHANNEL,
+                    chat_id=target,
                     text=chunk_text,
                     disable_web_page_preview=True,
                     parse_mode=ParseMode.MARKDOWN
@@ -196,6 +237,7 @@ async def worker():
     while True:
         chat_id, msg_id = await task_queue.get()
         active_user_id = chat_id
+        target = get_target_channel()
 
         try:
             msg = await app.get_messages(chat_id=chat_id, message_ids=msg_id)
@@ -222,7 +264,6 @@ async def worker():
         data = load_index_data()
         existing_sigs = set(data.get("existing_signatures", []))
 
-        # Check agar file pehle se channel me mojud hai
         if signature in existing_sigs and not signature.startswith("update_name_"):
             duplicate_skipped_count += 1
             task_queue.task_done()
@@ -233,14 +274,14 @@ async def worker():
         while not success:
             try:
                 copied_msg = await msg.copy(
-                    chat_id=TARGET_CHANNEL,
+                    chat_id=target,
                     caption=new_caption,
                     parse_mode=ParseMode.MARKDOWN
                 )
                 success = True
                 batch_count += 1
 
-                clean_id = get_clean_channel_id(TARGET_CHANNEL)
+                clean_id = get_clean_channel_id(target)
                 post_link = f"https://t.me/c/{clean_id}/{copied_msg.id}"
 
                 if display_title not in data["movies"]:
@@ -306,36 +347,74 @@ async def worker():
                 batch_count = 0
                 duplicate_skipped_count = 0
 
+# Start Command (Sabhi ke liye visible, users save honge)
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
+    save_user(message.from_user.id)
+    if not is_admin(None, None, message):
+        await message.reply_text("⛔ **Access Denied!**\nYeh bot private hai aur sirf Admin use kar sakta hai.")
+        return
+
     count = get_total_count()
+    cur_ch = get_target_channel()
     await message.reply_text(
         f"🤖 **Caption Cleaner Bot Active Hai!**\n\n"
-        f"📊 Channel Total Files: **{count}**\n"
-        f"📑 Master Index: **/build_index**\n"
-        f"🛠️ Fix Old Names: **/fix_captions**\n"
-        f"🗑️ Delete Channel Duplicates: **/remove_duplicates**\n"
-        f"⚡ Bulk me files bhejiye, duplicate apne aap ruk jayengi."
+        f"🎯 Current Channel: `{cur_ch}`\n"
+        f"📊 Channel Total Files: **{count}**\n\n"
+        f"⚙️ **Admin Commands:**\n"
+        f"• `/set_channel <id>` - Target channel badlein\n"
+        f"• `/users` - Total Bot Users check karein\n"
+        f"• `/stats` - Live Queue & Files check karein\n"
+        f"• `/remove_duplicates` - Duplicate files clean karein\n"
+        f"• `/build_index` - Master Index refresh karein\n"
+        f"• `/fix_captions` - Corrupt caption theek karein"
     )
 
-@app.on_message(filters.command("stats") & filters.private)
+# Dynamic Channel Changer Command
+@app.on_message(filters.command("set_channel") & filters.private & admin_filter)
+async def set_channel_handler(client, message):
+    if len(message.command) < 2:
+        cur = get_target_channel()
+        await message.reply_text(f"ℹ️ **Current Channel:** `{cur}`\n\nChannel badalne ke liye aise likhein:\n`/set_channel -100xxxxxxxxxx`")
+        return
+
+    new_channel_str = message.command[1].strip()
+    try:
+        new_channel_id = int(new_channel_str)
+        set_target_channel_id(new_channel_id)
+        await message.reply_text(
+            f"✅ **Target Channel Updated!**\n\n"
+            f"Ab sabhi files is channel me post hongi: `{new_channel_id}`\n\n"
+            f"⚠️ *Dhyan rahe:* Bot is naye channel me Admin hona chahiye!"
+        )
+    except ValueError:
+        await message.reply_text("❌ Galat Channel ID! ID number me honi chahiye (jaise `-1001234567890`).")
+
+# Bot Users Counter Command
+@app.on_message(filters.command("users") & filters.private & admin_filter)
+async def users_handler(client, message):
+    users = load_users()
+    await message.reply_text(f"👥 **Total Bot Users:** **{len(users)}** logo ne bot start kiya hai.")
+
+@app.on_message(filters.command("stats") & filters.private & admin_filter)
 async def stats_handler(client, message):
     count = get_total_count()
     q_size = task_queue.qsize()
+    cur_ch = get_target_channel()
     await message.reply_text(
         f"📊 **Live Status:**\n"
+        f"• Target Channel: `{cur_ch}`\n"
         f"• Total Channel Files: **{count}**\n"
         f"• Queue me bachi files: **{q_size}**"
     )
 
-# 1. चैनल की पुरानी डुप्लीकेट फाइल्स को डिलीट करने वाला फंक्शन
-@app.on_message(filters.command("remove_duplicates") & filters.private)
+@app.on_message(filters.command("remove_duplicates") & filters.private & admin_filter)
 async def remove_duplicates_handler(client, message):
-    status_msg = await message.reply_text("🔍 **Channel me duplicate files check ho rahi hain... Kripya wait karein.**")
-    clean_id = get_clean_channel_id(TARGET_CHANNEL)
+    target = get_target_channel()
+    status_msg = await message.reply_text("🔍 **Channel me duplicate files check ho rahi hain...**")
 
     try:
-        temp_msg = await app.send_message(TARGET_CHANNEL, "🔍 Scanning...")
+        temp_msg = await app.send_message(target, "🔍 Scanning...")
         latest_id = temp_msg.id
         await temp_msg.delete()
     except Exception as e:
@@ -350,10 +429,10 @@ async def remove_duplicates_handler(client, message):
     for i in range(1, latest_id + 1, batch_size):
         msg_ids = list(range(i, min(i + batch_size, latest_id + 1)))
         try:
-            messages = await app.get_messages(TARGET_CHANNEL, msg_ids)
+            messages = await app.get_messages(target, msg_ids)
         except FloodWait as e:
             await asyncio.sleep(e.value + 2)
-            messages = await app.get_messages(TARGET_CHANNEL, msg_ids)
+            messages = await app.get_messages(target, msg_ids)
         except Exception:
             continue
 
@@ -374,7 +453,6 @@ async def remove_duplicates_handler(client, message):
                     continue
 
                 if sig in seen_signatures:
-                    # Pehla post safe rahega, baad wala duplicate list me jayega
                     duplicates_to_delete.append(post.id)
                 else:
                     seen_signatures[sig] = post.id
@@ -382,39 +460,39 @@ async def remove_duplicates_handler(client, message):
     deleted_count = 0
     for del_id in duplicates_to_delete:
         try:
-            await app.delete_messages(chat_id=TARGET_CHANNEL, message_ids=del_id)
+            await app.delete_messages(chat_id=target, message_ids=del_id)
             deleted_count += 1
             await asyncio.sleep(0.5)
         except FloodWait as e:
             await asyncio.sleep(e.value + 1)
             try:
-                await app.delete_messages(chat_id=TARGET_CHANNEL, message_ids=del_id)
+                await app.delete_messages(chat_id=target, message_ids=del_id)
                 deleted_count += 1
             except Exception:
                 pass
         except Exception:
             pass
 
-    # Signatures data me sync kar lein
     data = load_index_data()
     data["existing_signatures"] = list(seen_signatures.keys())
     save_index_data(data)
 
     await status_msg.edit_text(
         f"🗑️ **Duplicate Clean-up Complete!**\n\n"
-        f"🔍 Total Messages Scanned: **{scanned}**\n"
-        f"🗑️ Duplicate Files Removed: **{deleted_count} files**\n"
+        f"🔍 Messages Scanned: **{scanned}**\n"
+        f"🗑️ Duplicates Removed: **{deleted_count} files**\n"
         f"✅ Unique Files Safe: **{len(seen_signatures)} files**\n\n"
-        f"👉 Index ko refresh karne ke liye ek baar **/build_index** bhej dein."
+        f"👉 Ek baar **/build_index** bhej dein."
     )
 
-@app.on_message(filters.command("fix_captions") & filters.private)
+@app.on_message(filters.command("fix_captions") & filters.private & admin_filter)
 async def fix_captions_handler(client, message):
+    target = get_target_channel()
     status_msg = await message.reply_text("🛠️ **Channel scan ho raha hai... ID wali files theek ki ja rahi hain...**")
     fixed_count = 0
 
     try:
-        temp_msg = await app.send_message(TARGET_CHANNEL, "🔍 Checking...")
+        temp_msg = await app.send_message(target, "🔍 Checking...")
         latest_id = temp_msg.id
         await temp_msg.delete()
     except Exception as e:
@@ -425,10 +503,10 @@ async def fix_captions_handler(client, message):
     for i in range(1, latest_id + 1, batch_size):
         msg_ids = list(range(i, min(i + batch_size, latest_id + 1)))
         try:
-            messages = await app.get_messages(TARGET_CHANNEL, msg_ids)
+            messages = await app.get_messages(target, msg_ids)
         except FloodWait as e:
             await asyncio.sleep(e.value + 2)
-            messages = await app.get_messages(TARGET_CHANNEL, msg_ids)
+            messages = await app.get_messages(target, msg_ids)
         except Exception:
             continue
 
@@ -463,14 +541,15 @@ async def fix_captions_handler(client, message):
         f"👉 Ab ek baar **/build_index** bhej dein."
     )
 
-@app.on_message(filters.command("build_index") & filters.private)
+@app.on_message(filters.command("build_index") & filters.private & admin_filter)
 async def build_index_handler(client, message):
+    target = get_target_channel()
     status_msg = await message.reply_text("⏳ **Channel scan shuru ho gaya hai... Kripya 1-2 minute wait karein.**")
-    clean_id = get_clean_channel_id(TARGET_CHANNEL)
+    clean_id = get_clean_channel_id(target)
     data = {"message_ids": [], "movies": {}, "existing_signatures": []}
 
     try:
-        temp_msg = await app.send_message(TARGET_CHANNEL, "🔍 Checking index...")
+        temp_msg = await app.send_message(target, "🔍 Checking index...")
         latest_id = temp_msg.id
         await temp_msg.delete()
     except Exception as e:
@@ -484,10 +563,10 @@ async def build_index_handler(client, message):
         for i in range(1, latest_id + 1, batch_size):
             msg_ids = list(range(i, min(i + batch_size, latest_id + 1)))
             try:
-                messages = await app.get_messages(TARGET_CHANNEL, msg_ids)
+                messages = await app.get_messages(target, msg_ids)
             except FloodWait as e:
                 await asyncio.sleep(e.value + 2)
-                messages = await app.get_messages(TARGET_CHANNEL, msg_ids)
+                messages = await app.get_messages(target, msg_ids)
             except Exception:
                 continue
 
@@ -525,7 +604,8 @@ async def build_index_handler(client, message):
     except Exception as e:
         await status_msg.edit_text(f"❌ Index banane me error: {e}")
 
-@app.on_message(filters.media & filters.private)
+# Media Handler (Sirf Admin bhej sakega)
+@app.on_message(filters.media & filters.private & admin_filter)
 async def process_media(client, message):
     await task_queue.put((message.chat.id, message.id))
 
