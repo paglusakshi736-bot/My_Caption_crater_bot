@@ -55,7 +55,7 @@ def load_index_data():
                 return json.load(f)
         except Exception:
             pass
-    return {"message_ids": [], "movies": {}}
+    return {"message_ids": [], "movies": {}, "existing_signatures": []}
 
 def save_index_data(data):
     with open(INDEX_FILE, "w") as f:
@@ -73,7 +73,7 @@ def clean_caption_text(text, fallback_id=None):
     if not text or not text.strip():
         tag = f" #ID_{fallback_id}" if fallback_id else ""
         caption = f"┏━━━━━━━━━━━━━━━━━┓\n🎬 **Update Name{tag}**\n┗━━━━━━━━━━━━━━━━━┛{CUSTOM_FOOTER}"
-        return caption, f"Update Name{tag}"
+        return caption, f"Update Name{tag}", f"update_name_{fallback_id}"
 
     movie_line_match = re.search(r'🎬\s*\**([^\*\n\r]+)', text)
     if movie_line_match:
@@ -100,6 +100,7 @@ def clean_caption_text(text, fallback_id=None):
 
     res_match = re.search(r'(\d{3,4}p|4K)', raw_title, re.IGNORECASE)
     quality = f" [{res_match.group(1).upper()}]" if res_match else ""
+    quality_tag = res_match.group(1).upper() if res_match else "DEFAULT"
 
     if year_match:
         name = raw_title[:year_match.start()].strip()
@@ -122,7 +123,9 @@ def clean_caption_text(text, fallback_id=None):
         f"┗━━━━━━━━━━━━━━━━━┛"
         f"{CUSTOM_FOOTER}"
     )
-    return full_caption, display_title
+    # Signature unique pehchan ke liye (naam + quality)
+    signature = f"{display_title}_{quality_tag}".lower().strip()
+    return full_caption, display_title, signature
 
 async def render_index_messages(data):
     sorted_movies = sorted(data["movies"].items(), key=lambda x: x[0].lower())
@@ -183,10 +186,11 @@ async def render_index_messages(data):
 
 task_queue = asyncio.Queue()
 batch_count = 0
+duplicate_skipped_count = 0
 active_user_id = None
 
 async def worker():
-    global batch_count, active_user_id
+    global batch_count, duplicate_skipped_count, active_user_id
     pending_index_updates = 0
 
     while True:
@@ -213,7 +217,17 @@ async def worker():
             elif msg.video:
                 original_text = getattr(msg.video, 'file_name', None) or getattr(msg.video, 'file_name', '')
 
-        new_caption, display_title = clean_caption_text(original_text, fallback_id=msg.id)
+        new_caption, display_title, signature = clean_caption_text(original_text, fallback_id=msg.id)
+
+        data = load_index_data()
+        existing_sigs = set(data.get("existing_signatures", []))
+
+        # Check agar file pehle se channel me mojud hai
+        if signature in existing_sigs and not signature.startswith("update_name_"):
+            duplicate_skipped_count += 1
+            task_queue.task_done()
+            await asyncio.sleep(0.1)
+            continue
 
         success = False
         while not success:
@@ -226,14 +240,17 @@ async def worker():
                 success = True
                 batch_count += 1
 
-                data = load_index_data()
                 clean_id = get_clean_channel_id(TARGET_CHANNEL)
                 post_link = f"https://t.me/c/{clean_id}/{copied_msg.id}"
 
                 if display_title not in data["movies"]:
                     data["movies"][display_title] = post_link
-                    save_index_data(data)
-                    pending_index_updates += 1
+
+                if "existing_signatures" not in data:
+                    data["existing_signatures"] = []
+                data["existing_signatures"].append(signature)
+                save_index_data(data)
+                pending_index_updates += 1
 
                 if pending_index_updates >= 10:
                     await render_index_messages(data)
@@ -251,8 +268,9 @@ async def worker():
                 await app.send_message(
                     chat_id=active_user_id,
                     text=(
-                        f"🚀 **50 Files Done!**\n\n"
-                        f"✅ 50 files successfully post ho gayi hain.\n"
+                        f"🚀 **50 Files Processed!**\n\n"
+                        f"✅ New Uploaded: **50 files**\n"
+                        f"🚫 Duplicate Skipped: **{duplicate_skipped_count} files**\n"
                         f"📊 Total Channel Files: **{total}**\n"
                         f"⏳ Remaining in Queue: **{task_queue.qsize()} files**"
                     )
@@ -270,32 +288,34 @@ async def worker():
                 await render_index_messages(data)
                 pending_index_updates = 0
 
-            if batch_count > 0:
+            if batch_count > 0 or duplicate_skipped_count > 0:
                 total = add_to_total_count(batch_count)
                 try:
                     await app.send_message(
                         chat_id=active_user_id,
                         text=(
-                            f"🎉 **Sabhi Files Complete Ho Gayi Hain!**\n\n"
-                            f"📥 Last Batch: **{batch_count} files**\n"
-                            f"📊 Total Files in Channel: **{total}**\n"
-                            f"✨ Queue bilkul khali ho chuki hai."
+                            f"🎉 **Batch Complete Ho Gaya!**\n\n"
+                            f"✅ **New Files Uploaded:** {batch_count}\n"
+                            f"🚫 **Duplicate Skipped:** {duplicate_skipped_count}\n"
+                            f"📊 **Total Channel Files:** {total}\n"
+                            f"✨ Sabhi files successfully process ho chuki hain."
                         )
                     )
                 except Exception:
                     pass
                 batch_count = 0
+                duplicate_skipped_count = 0
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     count = get_total_count()
     await message.reply_text(
         f"🤖 **Caption Cleaner Bot Active Hai!**\n\n"
-        f"📊 Channel me ab tak total: **{count} files**\n"
-        f"📑 Master Index Feature Active Hai!\n"
-        f"👉 Purani files ka index banane ke liye **/build_index** bhejein.\n"
-        f"🛠️ Channel me Movie ID_... wali files theek karne ke liye **/fix_captions** bhejein.\n"
-        f"⚡ Bulk me files bhejiye, bot queue me sambhal lega."
+        f"📊 Channel Total Files: **{count}**\n"
+        f"📑 Master Index: **/build_index**\n"
+        f"🛠️ Fix Old Names: **/fix_captions**\n"
+        f"🗑️ Delete Channel Duplicates: **/remove_duplicates**\n"
+        f"⚡ Bulk me files bhejiye, duplicate apne aap ruk jayengi."
     )
 
 @app.on_message(filters.command("stats") & filters.private)
@@ -306,6 +326,86 @@ async def stats_handler(client, message):
         f"📊 **Live Status:**\n"
         f"• Total Channel Files: **{count}**\n"
         f"• Queue me bachi files: **{q_size}**"
+    )
+
+# 1. चैनल की पुरानी डुप्लीकेट फाइल्स को डिलीट करने वाला फंक्शन
+@app.on_message(filters.command("remove_duplicates") & filters.private)
+async def remove_duplicates_handler(client, message):
+    status_msg = await message.reply_text("🔍 **Channel me duplicate files check ho rahi hain... Kripya wait karein.**")
+    clean_id = get_clean_channel_id(TARGET_CHANNEL)
+
+    try:
+        temp_msg = await app.send_message(TARGET_CHANNEL, "🔍 Scanning...")
+        latest_id = temp_msg.id
+        await temp_msg.delete()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {e}")
+        return
+
+    seen_signatures = {}
+    duplicates_to_delete = []
+    scanned = 0
+    batch_size = 100
+
+    for i in range(1, latest_id + 1, batch_size):
+        msg_ids = list(range(i, min(i + batch_size, latest_id + 1)))
+        try:
+            messages = await app.get_messages(TARGET_CHANNEL, msg_ids)
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 2)
+            messages = await app.get_messages(TARGET_CHANNEL, msg_ids)
+        except Exception:
+            continue
+
+        for post in messages:
+            if not post or post.empty:
+                continue
+            scanned += 1
+            if post.document or post.video:
+                raw = post.caption or ""
+                if not raw:
+                    if post.document and post.document.file_name:
+                        raw = post.document.file_name
+                    elif post.video and getattr(post.video, 'file_name', None):
+                        raw = post.video.file_name
+
+                _, _, sig = clean_caption_text(raw, fallback_id=post.id)
+                if not sig or sig.startswith("update_name_"):
+                    continue
+
+                if sig in seen_signatures:
+                    # Pehla post safe rahega, baad wala duplicate list me jayega
+                    duplicates_to_delete.append(post.id)
+                else:
+                    seen_signatures[sig] = post.id
+
+    deleted_count = 0
+    for del_id in duplicates_to_delete:
+        try:
+            await app.delete_messages(chat_id=TARGET_CHANNEL, message_ids=del_id)
+            deleted_count += 1
+            await asyncio.sleep(0.5)
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 1)
+            try:
+                await app.delete_messages(chat_id=TARGET_CHANNEL, message_ids=del_id)
+                deleted_count += 1
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # Signatures data me sync kar lein
+    data = load_index_data()
+    data["existing_signatures"] = list(seen_signatures.keys())
+    save_index_data(data)
+
+    await status_msg.edit_text(
+        f"🗑️ **Duplicate Clean-up Complete!**\n\n"
+        f"🔍 Total Messages Scanned: **{scanned}**\n"
+        f"🗑️ Duplicate Files Removed: **{deleted_count} files**\n"
+        f"✅ Unique Files Safe: **{len(seen_signatures)} files**\n\n"
+        f"👉 Index ko refresh karne ke liye ek baar **/build_index** bhej dein."
     )
 
 @app.on_message(filters.command("fix_captions") & filters.private)
@@ -345,7 +445,7 @@ async def fix_captions_handler(client, message):
                     real_file_name = post.video.file_name
 
                 if real_file_name:
-                    new_caption, _ = clean_caption_text(real_file_name, fallback_id=post.id)
+                    new_caption, _, _ = clean_caption_text(real_file_name, fallback_id=post.id)
                     try:
                         await post.edit_caption(new_caption, parse_mode=ParseMode.MARKDOWN)
                         fixed_count += 1
@@ -359,15 +459,15 @@ async def fix_captions_handler(client, message):
 
     await status_msg.edit_text(
         f"🎉 **Kaam Ho Gaya!**\n\n"
-        f"✅ Total **{fixed_count}** files jo 'Movie #ID_' ban gayi thin, unke naam theek kar diye gaye hain!\n"
-        f"👉 Ab ek baar **/build_index** bhej dein taaki list me bhi sahi naam jud jayein."
+        f"✅ Total **{fixed_count}** files theek kar di gayi hain!\n"
+        f"👉 Ab ek baar **/build_index** bhej dein."
     )
 
 @app.on_message(filters.command("build_index") & filters.private)
 async def build_index_handler(client, message):
     status_msg = await message.reply_text("⏳ **Channel scan shuru ho gaya hai... Kripya 1-2 minute wait karein.**")
     clean_id = get_clean_channel_id(TARGET_CHANNEL)
-    data = {"message_ids": [], "movies": {}}
+    data = {"message_ids": [], "movies": {}, "existing_signatures": []}
 
     try:
         temp_msg = await app.send_message(TARGET_CHANNEL, "🔍 Checking index...")
@@ -403,9 +503,11 @@ async def build_index_handler(client, message):
                         elif post.video and getattr(post.video, 'file_name', None):
                             raw = post.video.file_name
 
-                    _, display_title = clean_caption_text(raw, fallback_id=post.id)
+                    _, display_title, sig = clean_caption_text(raw, fallback_id=post.id)
                     if display_title not in data["movies"]:
                         data["movies"][display_title] = f"https://t.me/c/{clean_id}/{post.id}"
+                    if sig and sig not in data["existing_signatures"]:
+                        data["existing_signatures"].append(sig)
 
             await asyncio.sleep(0.5)
 
