@@ -127,11 +127,26 @@ async def extract_real_file_name(msg):
                 if fn:
                     return fn
 
+    try:
+        media = getattr(msg, 'video', None) or getattr(msg, 'document', None)
+        if media:
+            for key in ['attributes', 'raw']:
+                obj = getattr(media, key, None)
+                if obj and isinstance(obj, list):
+                    for item in obj:
+                        fn = getattr(item, 'file_name', None)
+                        if fn:
+                            return fn
+    except Exception:
+        pass
+
     if msg.forward_from_chat and msg.forward_from_message_id:
         try:
             fwd = await app.get_messages(msg.forward_from_chat.id, msg.forward_from_message_id)
-            if fwd and fwd.caption:
-                return fwd.caption
+            if fwd:
+                fwd_name = await extract_real_file_name(fwd)
+                if fwd_name:
+                    return fwd_name
         except Exception:
             pass
 
