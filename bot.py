@@ -84,8 +84,14 @@ def clean_caption_text(text, fallback_id=None):
         text_clean = re.sub(r'@[\w_]+', ' ', text_clean)
         text_clean = re.sub(r'join\s+us\s+on\s+telegram', ' ', text_clean, flags=re.IGNORECASE)
         text_clean = re.sub(r'join\s+telegram', ' ', text_clean, flags=re.IGNORECASE)
-        lines = [l.strip() for l in text_clean.split('\n') if l.strip() and not re.match(r'^[┏┗━\s]+$', l.strip())]
-        raw_title = lines[0] if lines else text_clean
+
+        valid_lines = []
+        for l in text_clean.split('\n'):
+            line_str = re.sub(r'^[┏┗━\s\[\]\(\)\-_#|~★❤✔➔➜•:]+', '', l.strip()).strip()
+            if line_str and re.search(r'[a-zA-Z0-9]', line_str):
+                valid_lines.append(l.strip())
+
+        raw_title = valid_lines[0] if valid_lines else text_clean
 
     raw_title = re.sub(r'[\._]', ' ', raw_title)
 
@@ -105,7 +111,7 @@ def clean_caption_text(text, fallback_id=None):
     name = re.sub(r'[\(\)\[\]\-_#|~★❤✔➔➜•:┏┗━*]+', ' ', name).strip()
     name = re.sub(r'\s+', ' ', name)
 
-    if not name:
+    if not name or ("Movie" in name and "#ID_" in name):
         tag = f" #ID_{fallback_id}" if fallback_id else ""
         name = f"Movie{tag}"
 
@@ -179,7 +185,6 @@ task_queue = asyncio.Queue()
 batch_count = 0
 active_user_id = None
 
-# सुपर-फास्ट और सेफ़ वर्कर सिस्टम
 async def worker():
     global batch_count, active_user_id
     pending_index_updates = 0
@@ -230,7 +235,6 @@ async def worker():
                     save_index_data(data)
                     pending_index_updates += 1
 
-                # हर 10 फाइल्स के बाद इंडेक्स अपडेट करेगा ताकि स्पीड न गिरे
                 if pending_index_updates >= 10:
                     await render_index_messages(data)
                     pending_index_updates = 0
@@ -258,7 +262,6 @@ async def worker():
             batch_count = 0
 
         task_queue.task_done()
-        # सेफ़ और फ़ास्ट डिले (2.5s से घटाकर 0.8s)
         await asyncio.sleep(0.8)
 
         if task_queue.empty():
@@ -291,6 +294,7 @@ async def start_handler(client, message):
         f"📊 Channel me ab tak total: **{count} files**\n"
         f"📑 Master Index Feature Active Hai!\n"
         f"👉 Purani files ka index banane ke liye **/build_index** bhejein.\n"
+        f"🛠️ Channel me Movie ID_... wali files theek karne ke liye **/fix_captions** bhejein.\n"
         f"⚡ Bulk me files bhejiye, bot queue me sambhal lega."
     )
 
@@ -304,11 +308,66 @@ async def stats_handler(client, message):
         f"• Queue me bachi files: **{q_size}**"
     )
 
+@app.on_message(filters.command("fix_captions") & filters.private)
+async def fix_captions_handler(client, message):
+    status_msg = await message.reply_text("🛠️ **Channel scan ho raha hai... ID wali files theek ki ja rahi hain...**")
+    fixed_count = 0
+
+    try:
+        temp_msg = await app.send_message(TARGET_CHANNEL, "🔍 Checking...")
+        latest_id = temp_msg.id
+        await temp_msg.delete()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {e}")
+        return
+
+    batch_size = 100
+    for i in range(1, latest_id + 1, batch_size):
+        msg_ids = list(range(i, min(i + batch_size, latest_id + 1)))
+        try:
+            messages = await app.get_messages(TARGET_CHANNEL, msg_ids)
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 2)
+            messages = await app.get_messages(TARGET_CHANNEL, msg_ids)
+        except Exception:
+            continue
+
+        for post in messages:
+            if not post or post.empty:
+                continue
+
+            caption = post.caption or ""
+            if ("Movie #ID_" in caption) or ("Update Name" in caption):
+                real_file_name = ""
+                if post.document and post.document.file_name:
+                    real_file_name = post.document.file_name
+                elif post.video and getattr(post.video, 'file_name', None):
+                    real_file_name = post.video.file_name
+
+                if real_file_name:
+                    new_caption, _ = clean_caption_text(real_file_name, fallback_id=post.id)
+                    try:
+                        await post.edit_caption(new_caption, parse_mode=ParseMode.MARKDOWN)
+                        fixed_count += 1
+                        await asyncio.sleep(1.0)
+                    except FloodWait as e:
+                        await asyncio.sleep(e.value + 2)
+                        await post.edit_caption(new_caption, parse_mode=ParseMode.MARKDOWN)
+                        fixed_count += 1
+                    except Exception:
+                        pass
+
+    await status_msg.edit_text(
+        f"🎉 **Kaam Ho Gaya!**\n\n"
+        f"✅ Total **{fixed_count}** files jo 'Movie #ID_' ban gayi thin, unke naam theek kar diye gaye hain!\n"
+        f"👉 Ab ek baar **/build_index** bhej dein taaki list me bhi sahi naam jud jayein."
+    )
+
 @app.on_message(filters.command("build_index") & filters.private)
 async def build_index_handler(client, message):
     status_msg = await message.reply_text("⏳ **Channel scan shuru ho gaya hai... Kripya 1-2 minute wait karein.**")
     clean_id = get_clean_channel_id(TARGET_CHANNEL)
-    data = {"message_ids": data_loaded.get("message_ids", []) if (data_loaded := load_index_data()) else [], "movies": {}}
+    data = {"message_ids": [], "movies": {}}
 
     try:
         temp_msg = await app.send_message(TARGET_CHANNEL, "🔍 Checking index...")
@@ -319,7 +378,6 @@ async def build_index_handler(client, message):
         return
 
     scanned = 0
-    added = 0
     batch_size = 100
 
     try:
@@ -339,19 +397,20 @@ async def build_index_handler(client, message):
                 scanned += 1
                 if post.document or post.video:
                     raw = post.caption or ""
-                    if not raw:
+                    if not raw or "Movie #ID_" in raw or "Update Name" in raw:
                         if post.document and post.document.file_name:
                             raw = post.document.file_name
-                        elif post.video and post.video.file_name:
+                        elif post.video and getattr(post.video, 'file_name', None):
                             raw = post.video.file_name
 
                     _, display_title = clean_caption_text(raw, fallback_id=post.id)
                     if display_title not in data["movies"]:
                         data["movies"][display_title] = f"https://t.me/c/{clean_id}/{post.id}"
-                        added += 1
 
             await asyncio.sleep(0.5)
 
+        old_data = load_index_data()
+        data["message_ids"] = old_data.get("message_ids", [])
         await render_index_messages(data)
         await status_msg.edit_text(
             f"✅ **Master Index Taiyar Ho Gaya Hai!**\n\n"
