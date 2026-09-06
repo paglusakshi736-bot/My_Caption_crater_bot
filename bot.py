@@ -110,19 +110,13 @@ def is_admin(_, __, message):
 
 admin_filter = filters.create(is_admin)
 
-async def extract_real_file_name(msg):
+async def get_raw_media_filename(msg):
     if not msg:
         return ""
-
-    if msg.caption and msg.caption.strip():
-        return msg.caption
-
     if msg.document and getattr(msg.document, 'file_name', None):
         return msg.document.file_name
-
     if msg.video and getattr(msg.video, 'file_name', None):
         return msg.video.file_name
-
     try:
         media = getattr(msg, 'video', None) or getattr(msg, 'document', None)
         if media:
@@ -131,7 +125,6 @@ async def extract_real_file_name(msg):
                 fn = getattr(attr, 'file_name', None)
                 if fn:
                     return fn
-
         raw = getattr(msg, '_raw', None) or getattr(msg, 'raw', None)
         if raw and hasattr(raw, 'media'):
             doc = getattr(raw.media, 'document', None)
@@ -142,50 +135,32 @@ async def extract_real_file_name(msg):
                         return fn
     except Exception:
         pass
-
-    if msg.forward_from_chat and msg.forward_from_message_id:
-        try:
-            fwd = await app.get_messages(msg.forward_from_chat.id, msg.forward_from_message_id)
-            if fwd:
-                fwd_name = await extract_real_file_name(fwd)
-                if fwd_name:
-                    return fwd_name
-        except Exception:
-            pass
-
     return ""
 
-def clean_caption_text(text, fallback_id=None):
+def parse_movie_details(text):
     if not text or not text.strip():
-        tag = f" #ID_{fallback_id}" if fallback_id else ""
-        caption = f"┏━━━━━━━━━━━━━━━━━┓\n🎬 **Update Name{tag}**\n┗━━━━━━━━━━━━━━━━━┛{CUSTOM_FOOTER}"
-        return caption, f"Update Name{tag}", f"update_name_{fallback_id}"
+        return None, None, None, "DEFAULT"
 
-    movie_line_match = re.search(r'🎬\s*\**([^\*\n\r]+)', text)
-    if movie_line_match:
-        raw_title = movie_line_match.group(1).strip()
-    else:
-        text_clean = re.sub(r'\.(mkv|mp4|avi|webm|mov)$', '', text, flags=re.IGNORECASE)
-        text_clean = re.sub(r'https?://\S+|www\.\S+|t\.me/\S+', ' ', text_clean)
-        text_clean = re.sub(r'@[\w_]+', ' ', text_clean)
-        text_clean = re.sub(r'(?i)\bjoin\s+us\s+on\s+telegram\b', ' ', text_clean)
-        text_clean = re.sub(r'(?i)\bjoin\s+telegram\b', ' ', text_clean)
+    text_clean = re.sub(r'\.(mkv|mp4|avi|webm|mov)$', '', text, flags=re.IGNORECASE)
+    text_clean = re.sub(r'https?://\S+|www\.\S+|t\.me/\S+', ' ', text_clean)
+    text_clean = re.sub(r'@[\w_]+', ' ', text_clean)
+    text_clean = re.sub(r'(?i)\bjoin\s+us\s+on\s+telegram\b', ' ', text_clean)
+    text_clean = re.sub(r'(?i)\bjoin\s+telegram\b', ' ', text_clean)
 
-        valid_lines = []
-        for l in text_clean.split('\n'):
-            line_str = re.sub(r'^[┏┗━\s\[\]\(\)\-_#|~★❤✔➔➜•:]+', '', l.strip()).strip()
-            if line_str and re.search(r'[a-zA-Z0-9]', line_str):
-                valid_lines.append(line_str)
+    valid_lines = []
+    for l in text_clean.split('\n'):
+        line_str = re.sub(r'^[┏┗━\s\[\]\(\)\-_#|~★❤✔➔➜•:]+', '', l.strip()).strip()
+        if line_str and re.search(r'[a-zA-Z0-9]', line_str):
+            valid_lines.append(line_str)
 
-        raw_title = valid_lines[0] if valid_lines else text_clean
-
+    raw_title = valid_lines[0] if valid_lines else text_clean
     raw_title = re.sub(r'[\._]', ' ', raw_title)
 
     year_match = re.search(r'\b(19[5-9]\d|20[0-3]\d)\b', raw_title)
-    year = f" ({year_match.group(1)})" if year_match else ""
+    year_str = f" ({year_match.group(1)})" if year_match else None
 
     res_match = re.search(r'\b(\d{3,4}p|4K|DS4K|HDRip|WEB-?DL|HD)\b', raw_title, re.IGNORECASE)
-    quality = f" [{res_match.group(1).upper()}]" if res_match else ""
+    quality_str = f" [{res_match.group(1).upper()}]" if res_match else ""
     quality_tag = res_match.group(1).upper() if res_match else "DEFAULT"
 
     cut_pos = len(raw_title)
@@ -199,9 +174,34 @@ def clean_caption_text(text, fallback_id=None):
     name = re.sub(r'\s+', ' ', name)
 
     if not name or name.lower() == "movie":
+        return None, None, None, "DEFAULT"
+
+    return name, year_str, quality_str, quality_tag
+
+async def get_final_movie_caption(msg, fallback_id=None):
+    caption_text = msg.caption or ""
+    file_name_text = await get_raw_media_filename(msg)
+
+    name, year, quality, q_tag = None, None, "", "DEFAULT"
+    if caption_text.strip():
+        p_name, p_year, p_qual, p_tag = parse_movie_details(caption_text)
+        if p_name and p_year:
+            name, year, quality, q_tag = p_name, p_year, p_qual, p_tag
+
+    if not name or not year:
+        if file_name_text.strip():
+            p_name, p_year, p_qual, p_tag = parse_movie_details(file_name_text)
+            if p_name:
+                name, year, quality, q_tag = p_name, p_year, p_qual, p_tag
+
+    if not name:
         tag = f" #ID_{fallback_id}" if fallback_id else ""
         name = f"Movie{tag}"
+        year = ""
+        quality = ""
+        q_tag = "DEFAULT"
 
+    year = year or ""
     display_title = f"{name}{year}".strip()
     full_caption = (
         f"┏━━━━━━━━━━━━━━━━━┓\n"
@@ -209,7 +209,7 @@ def clean_caption_text(text, fallback_id=None):
         f"┗━━━━━━━━━━━━━━━━━┛"
         f"{CUSTOM_FOOTER}"
     )
-    signature = f"{display_title}_{quality_tag}".lower().strip()
+    signature = f"{display_title}_{q_tag}".lower().strip()
     return full_caption, display_title, signature
 
 async def render_index_messages(data):
@@ -272,11 +272,10 @@ async def render_index_messages(data):
 
 task_queue = asyncio.Queue()
 batch_count = 0
-duplicate_skipped_count = 0
 active_user_id = None
 
 async def worker():
-    global batch_count, duplicate_skipped_count, active_user_id
+    global batch_count, active_user_id
     pending_index_updates = 0
 
     while True:
@@ -297,17 +296,8 @@ async def worker():
             task_queue.task_done()
             continue
 
-        original_text = await extract_real_file_name(msg)
-        new_caption, display_title, signature = clean_caption_text(original_text, fallback_id=msg.id)
-
+        new_caption, display_title, signature = await get_final_movie_caption(msg, fallback_id=msg.id)
         data = load_index_data()
-        existing_sigs = set(data.get("existing_signatures", []))
-
-        if signature in existing_sigs and not signature.startswith("update_name_"):
-            duplicate_skipped_count += 1
-            task_queue.task_done()
-            await asyncio.sleep(0.1)
-            continue
 
         success = False
         while not success:
@@ -349,8 +339,7 @@ async def worker():
                     chat_id=active_user_id,
                     text=(
                         f"🚀 **50 Files Processed!**\n\n"
-                        f"✅ New Uploaded: **50 files**\n"
-                        f"🚫 Duplicate Skipped: **{duplicate_skipped_count} files**\n"
+                        f"✅ Uploaded to Channel: **50 files**\n"
                         f"📊 Total Channel Files: **{total}**\n"
                         f"⏳ Remaining in Queue: **{task_queue.qsize()} files**"
                     )
@@ -368,15 +357,14 @@ async def worker():
                 await render_index_messages(data)
                 pending_index_updates = 0
 
-            if batch_count > 0 or duplicate_skipped_count > 0:
+            if batch_count > 0:
                 total = add_to_total_count(batch_count)
                 try:
                     await app.send_message(
                         chat_id=active_user_id,
                         text=(
                             f"🎉 **Batch Complete Ho Gaya!**\n\n"
-                            f"✅ **New Files Uploaded:** {batch_count}\n"
-                            f"🚫 **Duplicate Skipped:** {duplicate_skipped_count}\n"
+                            f"✅ **Total Uploaded:** {batch_count}\n"
                             f"📊 **Total Channel Files:** {total}\n"
                             f"✨ Sabhi files successfully process ho chuki hain."
                         )
@@ -384,7 +372,6 @@ async def worker():
                 except Exception:
                     pass
                 batch_count = 0
-                duplicate_skipped_count = 0
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
@@ -478,9 +465,8 @@ async def remove_duplicates_handler(client, message):
                 continue
             scanned += 1
             if post.document or post.video:
-                raw = await extract_real_file_name(post)
-                _, title, sig = clean_caption_text(raw, fallback_id=post.id)
-                if not sig or sig.startswith("update_name_"):
+                _, title, sig = await get_final_movie_caption(post, fallback_id=post.id)
+                if not sig or sig.startswith("movie #id_"):
                     continue
 
                 if sig in seen_signatures:
@@ -632,19 +618,17 @@ async def fix_captions_handler(client, message):
 
             caption = post.caption or ""
             if ("Movie #ID_" in caption) or ("Update Name" in caption) or (re.search(r'🎬\s*\*\*Movie\*\*', caption)):
-                real_file_name = await extract_real_file_name(post)
-                if real_file_name:
-                    new_caption, _, _ = clean_caption_text(real_file_name, fallback_id=post.id)
-                    try:
-                        await post.edit_caption(new_caption, parse_mode=ParseMode.MARKDOWN)
-                        fixed_count += 1
-                        await asyncio.sleep(1.0)
-                    except FloodWait as e:
-                        await asyncio.sleep(e.value + 2)
-                        await post.edit_caption(new_caption, parse_mode=ParseMode.MARKDOWN)
-                        fixed_count += 1
-                    except Exception:
-                        pass
+                new_caption, _, _ = await get_final_movie_caption(post, fallback_id=post.id)
+                try:
+                    await post.edit_caption(new_caption, parse_mode=ParseMode.MARKDOWN)
+                    fixed_count += 1
+                    await asyncio.sleep(1.0)
+                except FloodWait as e:
+                    await asyncio.sleep(e.value + 2)
+                    await post.edit_caption(new_caption, parse_mode=ParseMode.MARKDOWN)
+                    fixed_count += 1
+                except Exception:
+                    pass
 
     await status_msg.edit_text(
         f"🎉 **Kaam Ho Gaya!**\n\n"
@@ -686,8 +670,7 @@ async def build_index_handler(client, message):
                     continue
                 scanned += 1
                 if post.document or post.video:
-                    raw = await extract_real_file_name(post)
-                    _, display_title, sig = clean_caption_text(raw, fallback_id=post.id)
+                    _, display_title, sig = await get_final_movie_caption(post, fallback_id=post.id)
                     if display_title not in data["movies"]:
                         data["movies"][display_title] = f"https://t.me/c/{clean_id}/{post.id}"
                     if sig and sig not in data["existing_signatures"]:
