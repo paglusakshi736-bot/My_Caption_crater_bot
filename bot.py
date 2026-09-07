@@ -830,7 +830,112 @@ async def keep_alive_pinger():
             except Exception:
                 pass
         await asyncio.sleep(600)
+@app.on_message(filters.command("reset_index") & filters.private & admin_filter)
+async def reset_index_handler(client, message):
+    target = get_main_channel()
+    status_msg = await message.reply_text("🧹 **Purana Index saaf karke ekdam naya Index banaya ja raha hai... Kripya wait karein.**")
+    clean_id = get_clean_channel_id(target)
+    
+    # 1. Channel Scan karke fresh movies list banayein
+    data = {"message_ids": [], "movies": {}, "existing_signatures": []}
+    try:
+        temp_msg = await app.send_message(target, "🔍 Scanning channel...")
+        latest_id = temp_msg.id
+        await temp_msg.delete()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {e}")
+        return
 
+    batch_size = 100
+    for i in range(1, latest_id + 1, batch_size):
+        msg_ids = list(range(i, min(i + batch_size, latest_id + 1)))
+        try:
+            messages = await app.get_messages(target, msg_ids)
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 2)
+            messages = await app.get_messages(target, msg_ids)
+        except Exception:
+            continue
+
+        for post in messages:
+            if not post or post.empty:
+                continue
+            if post.document or post.video:
+                _, display_title, sig, is_unnamed = await get_final_movie_caption(post, fallback_id=post.id)
+                if not is_unnamed:
+                    if display_title not in data["movies"]:
+                        data["movies"][display_title] = f"https://t.me/c/{clean_id}/{post.id}"
+                    if sig and sig not in data["existing_signatures"]:
+                        data["existing_signatures"].append(sig)
+
+    # 2. Purane Index ke bikhre hue messages ko Channel se DELETE karein
+    old_data = load_index_data()
+    old_ids = old_data.get("message_ids", [])
+    if old_ids:
+        for old_id in old_ids:
+            try:
+                await app.delete_messages(chat_id=target, message_ids=old_id)
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
+
+    # 3. Naye सिरे se fresh Index banayein aur Pin karein
+    sorted_movies = sorted(data["movies"].items(), key=lambda x: x[0].lower())
+    chunks = []
+    lines = [f"• [{title}]({link})\n" for title, link in sorted_movies]
+
+    current_chunk = ""
+    for line in lines:
+        if len(current_chunk) + len(line) > 3500:
+            chunks.append(current_chunk)
+            current_chunk = line
+        else:
+            current_chunk += line
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    total_parts = len(chunks) or 1
+    new_message_ids = []
+
+    for idx, chunk_text in enumerate(chunks, 1):
+        header = f"📑 **Master Movies Index — Part {idx}/{total_parts}**\n\n"
+        full_text = header + chunk_text
+        try:
+            sent = await app.send_message(
+                chat_id=target,
+                text=full_text,
+                disable_web_page_preview=True,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            new_message_ids.append(sent.id)
+            if idx == 1:
+                try:
+                    await sent.pin(disable_notification=True)
+                except Exception:
+                    pass
+            await asyncio.sleep(1.0)
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 1)
+            sent = await app.send_message(
+                chat_id=target,
+                text=full_text,
+                disable_web_page_preview=True,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            new_message_ids.append(sent.id)
+        except Exception:
+            pass
+
+    data["message_ids"] = new_message_ids
+    save_index_data(data)
+
+    await status_msg.edit_text(
+        f"✨ **Index Re-created from Scratch!**\n\n"
+        f"🎬 Total Movies: **{len(data['movies'])}**\n"
+        f"📑 Total Parts: **{total_parts}**\n"
+        f"📌 Purane sabhi parts delete karke naya index pin kar diya gaya hai."
+    )
+    
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
     loop = asyncio.get_event_loop()
