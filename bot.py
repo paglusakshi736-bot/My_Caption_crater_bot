@@ -13,7 +13,7 @@ from pyrogram.errors import FloodWait
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-DEFAULT_TARGET_CHANNEL = int(os.environ.get("TARGET_CHANNEL"))
+DEFAULT_TARGET_CHANNEL = int(os.environ.get("TARGET_CHANNEL", "0"))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 PORT = int(os.environ.get("PORT", 8080))
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
@@ -38,18 +38,42 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
-def get_target_channel():
+def load_config():
+    default_cfg = {
+        "main_channel": DEFAULT_TARGET_CHANNEL,
+        "review_channel": DEFAULT_TARGET_CHANNEL
+    }
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
-                return json.load(f).get("target_channel", DEFAULT_TARGET_CHANNEL)
+                data = json.load(f)
+                return {
+                    "main_channel": data.get("main_channel", data.get("target_channel", DEFAULT_TARGET_CHANNEL)),
+                    "review_channel": data.get("review_channel", DEFAULT_TARGET_CHANNEL)
+                }
         except Exception:
-            return DEFAULT_TARGET_CHANNEL
-    return DEFAULT_TARGET_CHANNEL
+            return default_cfg
+    return default_cfg
 
-def set_target_channel_id(new_id):
+def save_config(cfg):
     with open(CONFIG_FILE, "w") as f:
-        json.dump({"target_channel": new_id}, f)
+        json.dump(cfg, f)
+
+def get_main_channel():
+    return load_config()["main_channel"]
+
+def get_review_channel():
+    return load_config()["review_channel"]
+
+def set_main_channel_id(new_id):
+    cfg = load_config()
+    cfg["main_channel"] = new_id
+    save_config(cfg)
+
+def set_review_channel_id(new_id):
+    cfg = load_config()
+    cfg["review_channel"] = new_id
+    save_config(cfg)
 
 def get_total_count():
     if os.path.exists(STATS_FILE):
@@ -194,7 +218,9 @@ async def get_final_movie_caption(msg, fallback_id=None):
             if p_name:
                 name, year, quality, q_tag = p_name, p_year, p_qual, p_tag
 
+    is_unnamed = False
     if not name:
+        is_unnamed = True
         tag = f" #ID_{fallback_id}" if fallback_id else ""
         name = f"Movie{tag}"
         year = ""
@@ -210,10 +236,10 @@ async def get_final_movie_caption(msg, fallback_id=None):
         f"{CUSTOM_FOOTER}"
     )
     signature = f"{display_title}_{q_tag}".lower().strip()
-    return full_caption, display_title, signature
+    return full_caption, display_title, signature, is_unnamed
 
 async def render_index_messages(data):
-    target = get_target_channel()
+    target = get_main_channel()
     sorted_movies = sorted(data["movies"].items(), key=lambda x: x[0].lower())
 
     chunks = []
@@ -272,16 +298,18 @@ async def render_index_messages(data):
 
 task_queue = asyncio.Queue()
 batch_count = 0
+review_count = 0
 active_user_id = None
 
 async def worker():
-    global batch_count, active_user_id
+    global batch_count, review_count, active_user_id
     pending_index_updates = 0
 
     while True:
         chat_id, msg_id = await task_queue.get()
         active_user_id = chat_id
-        target = get_target_channel()
+        main_ch = get_main_channel()
+        review_ch = get_review_channel()
 
         try:
             msg = await app.get_messages(chat_id=chat_id, message_ids=msg_id)
@@ -296,8 +324,8 @@ async def worker():
             task_queue.task_done()
             continue
 
-        new_caption, display_title, signature = await get_final_movie_caption(msg, fallback_id=msg.id)
-        data = load_index_data()
+        new_caption, display_title, signature, is_unnamed = await get_final_movie_caption(msg, fallback_id=msg.id)
+        target = review_ch if is_unnamed else main_ch
 
         success = False
         while not success:
@@ -308,23 +336,27 @@ async def worker():
                     parse_mode=ParseMode.MARKDOWN
                 )
                 success = True
-                batch_count += 1
 
-                clean_id = get_clean_channel_id(target)
-                post_link = f"https://t.me/c/{clean_id}/{copied_msg.id}"
+                if is_unnamed:
+                    review_count += 1
+                else:
+                    batch_count += 1
+                    data = load_index_data()
+                    clean_id = get_clean_channel_id(main_ch)
+                    post_link = f"https://t.me/c/{clean_id}/{copied_msg.id}"
 
-                if display_title not in data["movies"]:
-                    data["movies"][display_title] = post_link
+                    if display_title not in data["movies"]:
+                        data["movies"][display_title] = post_link
 
-                if "existing_signatures" not in data:
-                    data["existing_signatures"] = []
-                data["existing_signatures"].append(signature)
-                save_index_data(data)
-                pending_index_updates += 1
+                    if "existing_signatures" not in data:
+                        data["existing_signatures"] = []
+                    data["existing_signatures"].append(signature)
+                    save_index_data(data)
+                    pending_index_updates += 1
 
-                if pending_index_updates >= 10:
-                    await render_index_messages(data)
-                    pending_index_updates = 0
+                    if pending_index_updates >= 10:
+                        await render_index_messages(data)
+                        pending_index_updates = 0
 
             except FloodWait as e:
                 await asyncio.sleep(e.value + 2)
@@ -332,21 +364,23 @@ async def worker():
                 print(f"Skipping file due to error: {e}")
                 break
 
-        if batch_count >= 50:
+        if (batch_count + review_count) >= 50:
             total = add_to_total_count(batch_count)
             try:
                 await app.send_message(
                     chat_id=active_user_id,
                     text=(
                         f"🚀 **50 Files Processed!**\n\n"
-                        f"✅ Uploaded to Channel: **50 files**\n"
-                        f"📊 Total Channel Files: **{total}**\n"
+                        f"✅ Main Channel (Safe): **{batch_count} files**\n"
+                        f"⚠️ Review Channel (ID): **{review_count} files**\n"
+                        f"📊 Total Main Files: **{total}**\n"
                         f"⏳ Remaining in Queue: **{task_queue.qsize()} files**"
                     )
                 )
             except Exception:
                 pass
             batch_count = 0
+            review_count = 0
 
         task_queue.task_done()
         await asyncio.sleep(0.8)
@@ -357,21 +391,23 @@ async def worker():
                 await render_index_messages(data)
                 pending_index_updates = 0
 
-            if batch_count > 0:
+            if batch_count > 0 or review_count > 0:
                 total = add_to_total_count(batch_count)
                 try:
                     await app.send_message(
                         chat_id=active_user_id,
                         text=(
                             f"🎉 **Batch Complete Ho Gaya!**\n\n"
-                            f"✅ **Total Uploaded:** {batch_count}\n"
-                            f"📊 **Total Channel Files:** {total}\n"
-                            f"✨ Sabhi files successfully process ho chuki hain."
+                            f"✅ **Main Channel Me Gai:** {batch_count}\n"
+                            f"⚠️ **Review Channel Me Gai:** {review_count}\n"
+                            f"📊 **Total Main Channel Files:** {total}\n"
+                            f"✨ Processing successfully poori ho chuki hai."
                         )
                     )
                 except Exception:
                     pass
                 batch_count = 0
+                review_count = 0
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
@@ -381,38 +417,109 @@ async def start_handler(client, message):
         return
 
     count = get_total_count()
-    cur_ch = get_target_channel()
+    main_ch = get_main_channel()
+    rev_ch = get_review_channel()
     await message.reply_text(
-        f"🤖 **Caption Cleaner Bot Active Hai!**\n\n"
-        f"🎯 Current Channel: `{cur_ch}`\n"
-        f"📊 Channel Total Files: **{count}**\n\n"
+        f"🤖 **Caption Cleaner & Dual-Channel Bot Active Hai!**\n\n"
+        f"🎯 **Main Channel:** `{main_ch}` (Saaf movies)\n"
+        f"🛠️ **Review Channel:** `{rev_ch}` (Bina name / #ID files)\n"
+        f"📊 Main Channel Total Files: **{count}**\n\n"
         f"⚙️ **Admin Commands:**\n"
-        f"• `/set_channel <id>` - Target channel badlein\n"
-        f"• `/users` - Total Bot Users check karein\n"
-        f"• `/stats` - Live Queue & Files check karein\n"
-        f"• `/remove_duplicates` - Duplicates scan & mark karein\n"
+        f"• `/set_main <id>` - Main channel badlein\n"
+        f"• `/set_review <id>` - Review channel badlein\n"
+        f"• `/move_id_files` - Purani ID files Review Channel me bhejein\n"
+        f"• `/remove_duplicates` - Main channel duplicates review & delete karein\n"
         f"• `/build_index` - Master Index refresh karein\n"
-        f"• `/fix_captions` - Corrupt caption theek karein"
+        f"• `/fix_captions` - Main channel captions theek karein\n"
+        f"• `/users` - Total Bot Users check karein\n"
+        f"• `/stats` - Live Queue & Status check karein"
     )
 
-@app.on_message(filters.command("set_channel") & filters.private & admin_filter)
-async def set_channel_handler(client, message):
+@app.on_message(filters.command("set_main") & filters.private & admin_filter)
+async def set_main_handler(client, message):
     if len(message.command) < 2:
-        cur = get_target_channel()
-        await message.reply_text(f"ℹ️ **Current Channel:** `{cur}`\n\nChannel badalne ke liye aise likhein:\n`/set_channel -100xxxxxxxxxx`")
+        cur = get_main_channel()
+        await message.reply_text(f"ℹ️ **Current Main Channel:** `{cur}`\n\nAise likhein:\n`/set_main -100xxxxxxxxxx`")
         return
-
-    new_channel_str = message.command[1].strip()
     try:
-        new_channel_id = int(new_channel_str)
-        set_target_channel_id(new_channel_id)
-        await message.reply_text(
-            f"✅ **Target Channel Updated!**\n\n"
-            f"Ab sabhi files is channel me post hongi: `{new_channel_id}`\n\n"
-            f"⚠️ *Dhyan rahe:* Bot is naye channel me Admin hona chahiye!"
-        )
+        new_id = int(message.command[1].strip())
+        set_main_channel_id(new_id)
+        await message.reply_text(f"✅ **Main Channel Set:** `{new_id}`\nAb sahi naam wali files yahan aayengi!")
     except ValueError:
         await message.reply_text("❌ Galat Channel ID! ID number me honi chahiye (jaise `-1001234567890`).")
+
+@app.on_message(filters.command("set_review") & filters.private & admin_filter)
+async def set_review_handler(client, message):
+    if len(message.command) < 2:
+        cur = get_review_channel()
+        await message.reply_text(f"ℹ️ **Current Review Channel:** `{cur}`\n\nAise likhein:\n`/set_review -100xxxxxxxxxx`")
+        return
+    try:
+        new_id = int(message.command[1].strip())
+        set_review_channel_id(new_id)
+        await message.reply_text(f"✅ **Review Channel Set:** `{new_id}`\nAb bina naam / #ID wali files yahan aayengi!")
+    except ValueError:
+        await message.reply_text("❌ Galat Channel ID! ID number me honi chahiye (jaise `-1001234567890`).")
+
+@app.on_message(filters.command("move_id_files") & filters.private & admin_filter)
+async def move_id_files_handler(client, message):
+    main_ch = get_main_channel()
+    review_ch = get_review_channel()
+
+    if main_ch == review_ch:
+        await message.reply_text("❌ Main Channel aur Review Channel alag-alag hone chahiye! Pehle `/set_review <id>` karein.")
+        return
+
+    status_msg = await message.reply_text("🔍 **Main Channel scan ho raha hai... ID wali files dhoondi ja rahi hain...**")
+
+    try:
+        temp_msg = await app.send_message(main_ch, "🔍 Checking...")
+        latest_id = temp_msg.id
+        await temp_msg.delete()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {e}")
+        return
+
+    moved_count = 0
+    batch_size = 100
+
+    for i in range(1, latest_id + 1, batch_size):
+        msg_ids = list(range(i, min(i + batch_size, latest_id + 1)))
+        try:
+            messages = await app.get_messages(main_ch, msg_ids)
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 2)
+            messages = await app.get_messages(main_ch, msg_ids)
+        except Exception:
+            continue
+
+        for post in messages:
+            if not post or post.empty:
+                continue
+
+            caption = post.caption or ""
+            if ("#ID_" in caption) or ("Update Name" in caption):
+                try:
+                    await post.copy(chat_id=review_ch)
+                    await post.delete()
+                    moved_count += 1
+                    await asyncio.sleep(0.8)
+                except FloodWait as e:
+                    await asyncio.sleep(e.value + 2)
+                    try:
+                        await post.copy(chat_id=review_ch)
+                        await post.delete()
+                        moved_count += 1
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+    await status_msg.edit_text(
+        f"📦 **Transfer Complete!**\n\n"
+        f"🚚 Total **{moved_count} files** Review Channel me bhej di gayi hain aur Main Channel se hata di gayi hain!\n"
+        f"👉 Ab ek baar **/build_index** bhej dein taaki Main Channel ka Index refresh ho jaye."
+    )
 
 @app.on_message(filters.command("users") & filters.private & admin_filter)
 async def users_handler(client, message):
@@ -423,19 +530,21 @@ async def users_handler(client, message):
 async def stats_handler(client, message):
     count = get_total_count()
     q_size = task_queue.qsize()
-    cur_ch = get_target_channel()
+    main_ch = get_main_channel()
+    rev_ch = get_review_channel()
     await message.reply_text(
         f"📊 **Live Status:**\n"
-        f"• Target Channel: `{cur_ch}`\n"
-        f"• Total Channel Files: **{count}**\n"
+        f"• Main Channel: `{main_ch}`\n"
+        f"• Review Channel: `{rev_ch}`\n"
+        f"• Main Channel Files: **{count}**\n"
         f"• Queue me bachi files: **{q_size}**"
     )
 
 @app.on_message(filters.command("remove_duplicates") & filters.private & admin_filter)
 async def remove_duplicates_handler(client, message):
-    target = get_target_channel()
+    target = get_main_channel()
     clean_id = get_clean_channel_id(target)
-    status_msg = await message.reply_text("🔍 **Channel me duplicate files scan ho rahi hain... Kripya intezar karein.**")
+    status_msg = await message.reply_text("🔍 **Main Channel me duplicate files scan ho rahi hain...**")
 
     try:
         temp_msg = await app.send_message(target, "🔍 Scanning...")
@@ -465,8 +574,8 @@ async def remove_duplicates_handler(client, message):
                 continue
             scanned += 1
             if post.document or post.video:
-                _, title, sig = await get_final_movie_caption(post, fallback_id=post.id)
-                if not sig or sig.startswith("movie #id_"):
+                _, title, sig, is_unnamed = await get_final_movie_caption(post, fallback_id=post.id)
+                if not sig or is_unnamed:
                     continue
 
                 if sig in seen_signatures:
@@ -481,7 +590,7 @@ async def remove_duplicates_handler(client, message):
                     seen_signatures[sig] = post.id
 
     if not duplicates_to_mark:
-        await status_msg.edit_text(f"✅ **Koi Duplicate File Nahi Mili!**\n\n🔍 Messages Scanned: **{scanned}**\n✨ Sabhi files unique hain.")
+        await status_msg.edit_text(f"✅ **Koi Duplicate File Nahi Mili!**\n\n🔍 Messages Scanned: **{scanned}**\n✨ Main Channel ki sabhi files unique hain.")
         return
 
     await status_msg.edit_text(f"⚠️ **{len(duplicates_to_mark)} Duplicates mili hain!**\nUn par Tag lagaya ja raha hai...")
@@ -528,7 +637,7 @@ async def remove_duplicates_handler(client, message):
 
     more_text = f"\n...aur **{len(duplicates_to_mark) - 10}** aur files." if len(duplicates_to_mark) > 10 else ""
     report_text = (
-        f"📋 **Duplicate Files Review List:**\n\n"
+        f"📋 **Duplicate Files Review List (Main Channel):**\n\n"
         + "\n\n".join(report_lines)
         + more_text + "\n\n"
         f"⚠️ Sabhi {len(duplicates_to_mark)} duplicate posts par `#DUPLICATE_FILE` tag laga diya gaya hai.\n"
@@ -558,9 +667,9 @@ async def handle_delete_duplicates_callback(client, callback_query: CallbackQuer
         return
 
     await callback_query.message.edit_reply_markup(reply_markup=None)
-    await callback_query.message.reply_text(f"⏳ **{len(del_ids)} duplicates channel se delete ho rahe hain...**")
+    await callback_query.message.reply_text(f"⏳ **{len(del_ids)} duplicates Main Channel se delete ho rahe hain...**")
 
-    target = get_target_channel()
+    target = get_main_channel()
     deleted_count = 0
 
     for d_id in del_ids:
@@ -583,14 +692,14 @@ async def handle_delete_duplicates_callback(client, callback_query: CallbackQuer
 
     await callback_query.message.reply_text(
         f"🎉 **Clean-up Successful!**\n\n"
-        f"🗑️ Total **{deleted_count} duplicate files** channel se delete ho chuki hain!\n"
-        f"👉 Ab ek baar **/build_index** bhej dein taaki list refresh ho jaye."
+        f"🗑️ Total **{deleted_count} duplicate files** delete ho chuki hain!\n"
+        f"👉 Ab ek baar **/build_index** bhej dein."
     )
 
 @app.on_message(filters.command("fix_captions") & filters.private & admin_filter)
 async def fix_captions_handler(client, message):
-    target = get_target_channel()
-    status_msg = await message.reply_text("🛠️ **Channel scan ho raha hai... ID wali files theek ki ja rahi hain...**")
+    target = get_main_channel()
+    status_msg = await message.reply_text("🛠️ **Main Channel scan ho raha hai... ID wali files theek ki ja rahi hain...**")
     fixed_count = 0
 
     try:
@@ -618,17 +727,18 @@ async def fix_captions_handler(client, message):
 
             caption = post.caption or ""
             if ("Movie #ID_" in caption) or ("Update Name" in caption) or (re.search(r'🎬\s*\*\*Movie\*\*', caption)):
-                new_caption, _, _ = await get_final_movie_caption(post, fallback_id=post.id)
-                try:
-                    await post.edit_caption(new_caption, parse_mode=ParseMode.MARKDOWN)
-                    fixed_count += 1
-                    await asyncio.sleep(1.0)
-                except FloodWait as e:
-                    await asyncio.sleep(e.value + 2)
-                    await post.edit_caption(new_caption, parse_mode=ParseMode.MARKDOWN)
-                    fixed_count += 1
-                except Exception:
-                    pass
+                new_caption, _, _, is_unnamed = await get_final_movie_caption(post, fallback_id=post.id)
+                if not is_unnamed:
+                    try:
+                        await post.edit_caption(new_caption, parse_mode=ParseMode.MARKDOWN)
+                        fixed_count += 1
+                        await asyncio.sleep(1.0)
+                    except FloodWait as e:
+                        await asyncio.sleep(e.value + 2)
+                        await post.edit_caption(new_caption, parse_mode=ParseMode.MARKDOWN)
+                        fixed_count += 1
+                    except Exception:
+                        pass
 
     await status_msg.edit_text(
         f"🎉 **Kaam Ho Gaya!**\n\n"
@@ -638,8 +748,8 @@ async def fix_captions_handler(client, message):
 
 @app.on_message(filters.command("build_index") & filters.private & admin_filter)
 async def build_index_handler(client, message):
-    target = get_target_channel()
-    status_msg = await message.reply_text("⏳ **Channel scan shuru ho gaya hai... Kripya 1-2 minute wait karein.**")
+    target = get_main_channel()
+    status_msg = await message.reply_text("⏳ **Main Channel scan shuru ho gaya hai... Kripya 1-2 minute wait karein.**")
     clean_id = get_clean_channel_id(target)
     data = {"message_ids": [], "movies": {}, "existing_signatures": []}
 
@@ -670,11 +780,12 @@ async def build_index_handler(client, message):
                     continue
                 scanned += 1
                 if post.document or post.video:
-                    _, display_title, sig = await get_final_movie_caption(post, fallback_id=post.id)
-                    if display_title not in data["movies"]:
-                        data["movies"][display_title] = f"https://t.me/c/{clean_id}/{post.id}"
-                    if sig and sig not in data["existing_signatures"]:
-                        data["existing_signatures"].append(sig)
+                    _, display_title, sig, is_unnamed = await get_final_movie_caption(post, fallback_id=post.id)
+                    if not is_unnamed:
+                        if display_title not in data["movies"]:
+                            data["movies"][display_title] = f"https://t.me/c/{clean_id}/{post.id}"
+                        if sig and sig not in data["existing_signatures"]:
+                            data["existing_signatures"].append(sig)
 
             await asyncio.sleep(0.5)
 
@@ -685,7 +796,7 @@ async def build_index_handler(client, message):
             f"✅ **Master Index Taiyar Ho Gaya Hai!**\n\n"
             f"🔍 Total Messages Scanned: **{scanned}**\n"
             f"🎬 Unique Movies in Index: **{len(data['movies'])}**\n"
-            f"📌 Channel me Master Index update aur pin ho chuka hai."
+            f"📌 Main Channel me Master Index update aur pin ho chuka hai."
         )
     except FloodWait as e:
         await asyncio.sleep(e.value + 2)
