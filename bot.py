@@ -324,35 +324,36 @@ async def worker():
             task_queue.task_done()
             continue
 
-        new_caption, display_title, signature, is_unnamed = await get_final_movie_caption(msg, fallback_id=msg.id)
-        target = review_ch if is_unnamed else main_ch
+new_caption, display_title, signature, is_unnamed = await get_final_movie_caption(msg, fallback_id=msg.id)
+target = review_ch if is_unnamed else main_ch
 
-        success = False
-        while not success:
-            try:
-                copied_msg = await msg.copy(
-                    chat_id=target,
-                    caption=new_caption,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-                success = True
+success = False
+while not success:
+    try:
+        copied_msg = await msg.copy(
+            chat_id=target,
+            caption=new_caption,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        success = True
 
-                if is_unnamed:
-                    review_count += 1
-                else:
-                    batch_count += 1
-                    data = load_index_data()
-                    clean_id = get_clean_channel_id(main_ch)
-                    post_link = f"https://t.me/c/{clean_id}/{copied_msg.id}"
+        if is_unnamed:
+            review_count += 1
+        else:
+            batch_count += 1
+            data = load_index_data()
+            clean_id = get_clean_channel_id(main_ch)
+            post_link = f"https://t.me/c/{clean_id}/{copied_msg.id}"
 
-                    if display_title not in data["movies"]:
-                        data["movies"][display_title] = post_link
+            if display_title not in data["movies"]:
+                data["movies"][display_title] = post_link
 
-                    if "existing_signatures" not in data:
-                        data["existing_signatures"] = []
-                    data["existing_signatures"].append(signature)
-                    save_index_data(data)
-                    pending_index_updates += 1
+            if "existing_signatures" not in data:
+                data["existing_signatures"] = []
+            data["existing_signatures"].append(signature)
+            save_index_data(data)
+            pending_index_updates += 1
+            
 
                     if pending_index_updates >= 10:
                         await render_index_messages(data)
