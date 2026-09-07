@@ -324,36 +324,46 @@ async def worker():
             task_queue.task_done()
             continue
 
-new_caption, display_title, signature, is_unnamed = await get_final_movie_caption(msg, fallback_id=msg.id)
-target = review_ch if is_unnamed else main_ch
+        new_caption, display_title, signature, is_unnamed = await get_final_movie_caption(msg, fallback_id=msg.id)
+        data = load_index_data()
+        existing_sigs = set(data.get("existing_signatures", []))
 
-success = False
-while not success:
-    try:
-        copied_msg = await msg.copy(
-            chat_id=target,
-            caption=new_caption,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        success = True
+        is_duplicate = False
+        if not is_unnamed and signature in existing_sigs:
+            is_duplicate = True
 
-        if is_unnamed:
-            review_count += 1
+        if is_unnamed or is_duplicate:
+            target = review_ch
+            if is_duplicate:
+                new_caption = "⚠️ **#DUPLICATE_FILE**\n\n" + new_caption
         else:
-            batch_count += 1
-            data = load_index_data()
-            clean_id = get_clean_channel_id(main_ch)
-            post_link = f"https://t.me/c/{clean_id}/{copied_msg.id}"
+            target = main_ch
 
-            if display_title not in data["movies"]:
-                data["movies"][display_title] = post_link
+        success = False
+        while not success:
+            try:
+                copied_msg = await msg.copy(
+                    chat_id=target,
+                    caption=new_caption,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                success = True
 
-            if "existing_signatures" not in data:
-                data["existing_signatures"] = []
-            data["existing_signatures"].append(signature)
-            save_index_data(data)
-            pending_index_updates += 1
-            
+                if is_unnamed or is_duplicate:
+                    review_count += 1
+                else:
+                    batch_count += 1
+                    clean_id = get_clean_channel_id(main_ch)
+                    post_link = f"https://t.me/c/{clean_id}/{copied_msg.id}"
+
+                    if display_title not in data["movies"]:
+                        data["movies"][display_title] = post_link
+
+                    if "existing_signatures" not in data:
+                        data["existing_signatures"] = []
+                    data["existing_signatures"].append(signature)
+                    save_index_data(data)
+                    pending_index_updates += 1
 
                     if pending_index_updates >= 10:
                         await render_index_messages(data)
@@ -936,7 +946,98 @@ async def reset_index_handler(client, message):
         f"📑 Total Parts: **{total_parts}**\n"
         f"📌 Purane sabhi parts delete karke naya index pin kar diya gaya hai."
     )
+@app.on_message(filters.command("move_duplicates") & filters.private & admin_filter)
+async def move_duplicates_handler(client, message):
+    main_ch = get_main_channel()
+    review_ch = get_review_channel()
+
+    if main_ch == review_ch:
+        await message.reply_text("❌ Main Channel aur Review Channel alag-alag hone chahiye! Pehle `/set_review <id>` karein.")
+        return
+
+    status_msg = await message.reply_text("🔍 **Main Channel scan ho raha hai... Purani duplicate files dhoondi ja rahi hain...**")
+
+    try:
+        temp_msg = await app.send_message(main_ch, "🔍 Checking duplicates...")
+        latest_id = temp_msg.id
+        await temp_msg.delete()
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {e}")
+        return
+
+    seen_signatures = {}
+    duplicates_to_move = []
+    scanned = 0
+    batch_size = 100
+
+    for i in range(1, latest_id + 1, batch_size):
+        msg_ids = list(range(i, min(i + batch_size, latest_id + 1)))
+        try:
+            messages = await app.get_messages(main_ch, msg_ids)
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 2)
+            messages = await app.get_messages(main_ch, msg_ids)
+        except Exception:
+            continue
+
+        for post in messages:
+            if not post or post.empty:
+                continue
+            scanned += 1
+            if post.document or post.video:
+                _, title, sig, is_unnamed = await get_final_movie_caption(post, fallback_id=post.id)
+                if not sig or is_unnamed:
+                    continue
+
+                if sig in seen_signatures:
+                    orig_id = seen_signatures[sig]
+                    duplicates_to_move.append({
+                        "post": post,
+                        "orig_id": orig_id,
+                        "title": title
+                    })
+                else:
+                    seen_signatures[sig] = post.id
+
+    if not duplicates_to_move:
+        await status_msg.edit_text(f"✅ **Main Channel me koi purani duplicate file nahi mili!**\n🔍 Total Scanned: **{scanned}**")
+        return
+
+    await status_msg.edit_text(f"⚠️ **{len(duplicates_to_move)} Duplicates mili hain!**\nInhe Review Channel me shift kiya ja raha hai...")
+
+    moved_count = 0
+    for item in duplicates_to_move:
+        post = item["post"]
+        orig_id = item["orig_id"]
+        cur_cap = post.caption or ""
+
+        marked_caption = f"⚠️ **#DUPLICATE_FILE** (Original Post: `#ID_{orig_id}`)\n\n" + cur_cap
+
+        try:
+            # 1. Review Channel me copy bhejein
+            await post.copy(chat_id=review_ch, caption=marked_caption, parse_mode=ParseMode.MARKDOWN)
+            # 2. Main Channel se delete karein
+            await post.delete()
+            moved_count += 1
+            await asyncio.sleep(0.8)
+        except FloodWait as e:
+            await asyncio.sleep(e.value + 2)
+            try:
+                await post.copy(chat_id=review_ch, caption=marked_caption, parse_mode=ParseMode.MARKDOWN)
+                await post.delete()
+                moved_count += 1
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    await status_msg.edit_text(
+        f"🎉 **Duplicate Cleanup Complete!**\n\n"
+        f"🚚 Total **{moved_count} duplicates** Main Channel se hata kar Review Channel me transfer kar di gayi hain!\n"
+        f"👉 Ab ek baar **/build_index** chala dein taaki index update ho jaye."
+    )
     
+        
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
     loop = asyncio.get_event_loop()
